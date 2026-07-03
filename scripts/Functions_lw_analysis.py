@@ -543,7 +543,7 @@ class MC_Set:
             
         return res
         
-    def energy_exchange(self,z):
+    def energy_exchange(self,z : np.ndarray,T : float):
         
         pathes = [self.paths[i] for i in range(len(self.paths)) if \
                       self.paths[i].Abs_atm == True]
@@ -555,7 +555,7 @@ class MC_Set:
             if index_z >= (z.size-1) :
                 index_z = int(len(res)-1)
                 
-            res[index_z] += path.W/self.Nbre_photon
+            res[index_z] += path.W/self.Nbre_photon - Planck_law(wavelength = path.wlen, temperature = T)
             
         return res
         
@@ -1178,6 +1178,12 @@ def plotting_flux_profile_all_cams(
     fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(12, 6), layout='constrained')
 
     im = None 
+    
+    ds = xr.open_dataset("/home/barroisl/Transect_MC_auto/topographie/lavey_topo_params_30.nc")
+    ds['ts'] = (['y','x'], altit_T(dem = ds['zs'].values, T0 = 273, z0 = 1300))
+    
+    cam_tgt = np.loadtxt("/home/barroisl/Transect_MC_auto/camera_tgt/polygon_lavey_30_100.txt")[:,:3]
+    T_interp = interpolate(ds = ds, var_name = 'ts', points = cam_tgt)
 
     for j,atm in enumerate(["SMLSATM","SMLWATM"]):
 
@@ -1194,15 +1200,16 @@ def plotting_flux_profile_all_cams(
 
             mc_set = MC_Set(dat,cam[:3])
             alt_cams[d] = cam[2]
-            res_[:,d] = mc_set.energy_exchange(z)
+            res_[:,d] = mc_set.energy_exchange(z,T_interp[d])
 
         im = axs[j].pcolormesh(
                 res_,
-                norm=LogNorm(vmin=1e-7, vmax=1e2),
-                cmap='binary',
+                vmin = -50,
+                vmax = 50,
+                cmap='RdBu_r',
                 shading='auto')
         
-        axs[j].scatter(np.arange(alt_cams.size), alt_cams/dz, color = 'dodgerblue', marker = "*")
+        axs[j].scatter(np.arange(alt_cams.size), alt_cams/dz, color = 'dodgerblue', marker = "o", s = 1)
 
         # --- Y ticks every 500 m ---
         if j == 0 :
