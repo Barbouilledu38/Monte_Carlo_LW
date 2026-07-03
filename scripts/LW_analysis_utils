@@ -1,0 +1,1460 @@
+#!/usr/bin/env python3
+
+################## Imports ############################################
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from sklearn.linear_model import LinearRegression
+import numba as nb
+from numba import prange
+from matplotlib import cm
+import matplotlib.colors as colors
+import math
+import time
+from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
+from matplotlib import pylab
+from tqdm import tqdm
+import os
+import matplotlib.ticker as ticker
+import numpy as np
+import rasterio
+import netCDF4 as nc
+import os
+import numba
+from tqdm import tqdm
+import random
+from pyproj import Transformer
+import xarray as xr
+import csv
+from matplotlib.patches import FancyArrowPatch
+from ipywidgets import FloatSlider, interact
+from matplotlib.widgets import Button, Slider
+from ipywidgets import interact
+from PIL import Image
+from pathlib import Path
+from scipy.stats import norm
+
+################## Coordinates stuff ##################################
+
+def convert_epsg_pts(xs,ys, epsg_src=4326, epsg_tgt=32632):
+    """
+    Simple function to convert a list fo poitn from one projection to another oen using PyProj
+
+    Args:
+        xs (array): 1D array with X-coordinate expressed in the source EPSG
+        ys (array): 1D array with Y-coordinate expressed in the source EPSG
+        epsg_src (int): source projection EPSG code
+        epsg_tgt (int): target projection EPSG code
+
+    Returns: 
+        array: Xs 1D arrays of the point coordinates expressed in the target projection
+        array: Ys 1D arrays of the point coordinates expressed in the target projection
+    """
+    #print('Convert coordinates from EPSG:{} to EPSG:{}'.format(epsg_src, epsg_tgt))
+    trans = Transformer.from_crs("epsg:{}".format(epsg_src), "epsg:{}".format(epsg_tgt), always_xy=True)
+    Xs, Ys = trans.transform(xs, ys)
+    return Xs, Ys
+
+################### Interpolation ########################################
+
+@nb.njit(cache=True)
+def _searchsorted(arr: np.ndarray, val: float) -> int:
+    """Recherche binaire : retourne l'index i tel que arr[i] <= val < arr[i+1]."""
+    lo, hi = 0, arr.shape[0] - 2          # on veut l'index gauche
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if arr[mid] <= val:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+@nb.njit(cache=True, parallel=False)
+def bilinear_interpolation(
+    xs: np.ndarray,   # coordonnées x de la grille  (Nx,)  triées croissantes
+    ys: np.ndarray,   # coordonnées y de la grille  (Ny,)  triées croissantes
+    svf: np.ndarray,  # valeurs SVF                 (Ny, Nx)
+    points: np.ndarray,  # points cibles             (N, 3)  colonnes x, y, z
+) -> np.ndarray:
+    """
+    Interpolation bilinéaire de `svf` aux positions (x, y) de chaque point.
+ 
+    Parameters
+    ----------
+    xs     : 1-D array de longueur Nx — axe x de la grille (croissant)
+    ys     : 1-D array de longueur Ny — axe y de la grille (croissant)
+    svf    : 2-D array (Ny, Nx)       — valeurs à interpoler
+    points : 2-D array (N, 3)         — col 0 = x, col 1 = y, col 2 = z (ignoré)
+ 
+    Returns
+    -------
+    result : 1-D array (N,) de valeurs SVF interpolées (NaN si hors grille)
+    """
+    N = points.shape[0]
+    result = np.empty(N, dtype=np.float64)
+ 
+    x_min, x_max = xs[0], xs[-1]
+    y_min, y_max = ys[0], ys[-1]
+ 
+    for k in range(N):
+        px = points[k, 0]
+        py = points[k, 1]
+ 
+        # Hors domaine → NaN
+        if px < x_min or px > x_max or py < y_min or py > y_max:
+            result[k] = np.nan
+            continue
+ 
+        ix = _searchsorted(xs, px)
+        iy = _searchsorted(ys, py)
+        
+        while (np.isnan(svf[iy,ix]) == True or svf[iy+1,ix+1] == True or
+            svf[iy+1,ix] == True or svf[iy,ix+1] == True):
+            
+            ix = ix+1
+            iy = iy+1
+            
+        x0, x1 = xs[ix], xs[ix + 1]
+        y0, y1 = ys[iy], ys[iy + 1]
+ 
+        # Poids de pondération
+        tx = (px - x0) / (x1 - x0)
+        ty = (py - y0) / (y1 - y0)
+ 
+        # Coins de la cellule  svf[iy, ix] → ligne = y, colonne = x
+        f00 = svf[iy,     ix    ]
+        f10 = svf[iy,     ix + 1]
+        f01 = svf[iy + 1, ix    ]
+        f11 = svf[iy + 1, ix + 1]
+ 
+        result[k] = (
+            f00 * (1 - tx) * (1 - ty)
+            + f10 *      tx  * (1 - ty)
+            + f01 * (1 - tx) *      ty
+            + f11 *      tx  *      ty
+        )
+ 
+    return result
+
+def interpolate(
+    ds: xr.Dataset,
+    points: np.ndarray,
+    var_name: str, #= "SVF",
+    x_dim: str = "x",
+    y_dim: str = "y",
+) -> np.ndarray:
+    """
+    Interpole la variable `var_name` du dataset xarray aux positions (x, y)
+    définies par un tableau de points 3D.
+ 
+    Parameters
+    ----------
+    ds       : xr.Dataset contenant la variable et des coordonnées x/y régulières
+    points   : np.ndarray de forme (N, 2) — colonnes [x, y]
+    x_dim    : nom de la dimension x dans le dataset  (défaut : 'x')
+    y_dim    : nom de la dimension y dans le dataset  (défaut : 'y')
+    var_name : nom de la variable à interpoler        (défaut : 'SVF')
+ 
+    Returns
+    -------
+    np.ndarray (N,) de valeurs interpolées (float64, NaN hors domaine)
+    """
+    # Extraction des tableaux NumPy (opération Python — hors numba)
+    
+    xs  = ds[x_dim].values.astype(np.float64)
+    ys  = ds[y_dim].values.astype(np.float64)
+    svf = ds[var_name].values.astype(np.float64)
+ 
+    # Garantit que les axes sont croissants (xarray peut les stocker décroissants)
+    if xs[-1] < xs[0]:
+        xs  = xs[::-1].copy()
+        svf = svf[:, ::-1].copy()
+    if ys[-1] < ys[0]:
+        ys  = ys[::-1].copy()
+        svf = svf[::-1, :].copy()
+ 
+    pts = np.ascontiguousarray(points, dtype=np.float64)
+     
+    return bilinear_interpolation(xs, ys, svf, pts)
+
+################### Class mc_set #####################################
+
+@nb.njit()
+def get_collisions(index, collision):
+    collisions_index = collision[collision[:,0]==index][:,1:]
+    return collisions_index
+
+@nb.njit()
+def get_pos_abs(coll):
+    collision_finale = coll[coll[:,0] != 2][0,1:4]
+    return collision_finale
+
+@nb.njit()
+def get_reflections(collisions):
+    reflections = collisions[collisions[:,0] == 2][:,1:4]
+    return reflections
+
+@nb.njit()
+def get_dist(Pos_abs,pos_camera):
+    return np.sqrt(np.sum((Pos_abs[:2]-pos_camera[:2])**2))
+
+@nb.njit()
+def get_full_dist(Pos_abs,pos_camera):
+    return np.sqrt(np.sum((Pos_abs-pos_camera)**2))
+
+@nb.njit()
+def get_Azimuth(Pos_abs,pos_camera):
+    return math.atan2(Pos_abs[1]-pos_camera[1],Pos_abs[0]-pos_camera[0])
+
+@nb.njit()
+def get_zenithal(Pos_abs,pos_camera):
+    return math.atan2(Pos_abs[2]-pos_camera[2],get_dist(Pos_abs,pos_camera))
+
+class MC_chemin:
+
+    """
+    Class pour un chemin. Donne son index, sa finallité (surf ou atm), son nombre de diffusions,
+    de réflexion, son poids en triant dans le 2D array collisions
+    """
+    
+    def __init__(self, data_path,pos_camera,W_tot): 
+        
+        self.Index = data_path[0]
+        self.Abs_surf = np.isclose(data_path[1],0.)
+        self.Abs_atm = np.isclose(data_path[1],1.)
+        self.Space = np.isclose(data_path[1],2.)
+
+        self.wlen = data_path[7]
+        self.Nbre_refl = data_path[2]
+        # self.Nbre_diff = chemin[3] : pas de diffusion LW
+        self.W = data_path[6] #/W_tot pour avoir la participation relative
+        self.relative_weight = self.W/W_tot
+        self.pos_camera = pos_camera
+
+        #self.collision_self = get_collisions(self.Index, collisions)
+        self.Pos_abs = np.array(data_path[3:6])
+        #self.reflections = get_reflections(self.collision_self)
+        self.Dist = get_dist(self.Pos_abs,pos_camera)
+        self.full_dist = get_full_dist(self.Pos_abs,pos_camera)
+        self.Azimuth = get_Azimuth(self.Pos_abs,pos_camera)
+        self.zenithal = get_zenithal(self.Pos_abs,pos_camera)
+        
+class MC_Set:
+    
+    """
+    Classe sortant d'une simulation de MC. Statistique sur les chemins et figures
+    """
+    
+    def __init__(self,data_path,pos_camera):
+        
+        # Caractéristique simu
+        self.Nbre_photon = data_path.shape[0]
+        self.pos_camera = pos_camera
+        
+        # Statistique de chemin   
+        self.Nbre_reflexion = np.sum(data_path[:,2])
+        self.Nbre_moyen_reflexion_exc = self.Nbre_reflexion/data_path[data_path[:,2] != 0].shape[0]
+        self.Nbre_surf = data_path[(data_path[:,1] == 0.) & (data_path[:,2] == 0.)].shape[0]
+        self.Nbre_atm = data_path[(data_path[:,1] == 1)  & (data_path[:,2] == 0)].shape[0]
+        self.Nbre_reflect_surf = data_path[(data_path[:,1] == 0) & (data_path[:,2] != 0)].shape[0]
+        self.Nbre_reflect_atm = data_path[(data_path[:,1] == 1)  & (data_path[:,2] != 0)].shape[0]            
+        self.Nbre_space = data_path[data_path[:,1] == 2].shape[0]     
+        
+        # Poids par catégorie
+        
+        self.W_tot = np.sum(data_path[:,6])
+        self.W_atm = np.sum(data_path[(data_path[:,1] == 1) & (data_path[:,2] == 0)][:,6])/self.W_tot
+        
+        self.W_reflechis_atm = np.sum(data_path[(data_path[:,2] != 0) & (data_path[:,1] == 1)][:,6])/self.W_tot
+        self.W_reflechis_surf = np.sum(data_path[(data_path[:,2] != 0) & (data_path[:,1] == 0)][:,6])/self.W_tot
+        
+        if len(data_path[data_path[:,1] == 0]) > 0 :
+            self.W_surf = np.sum(data_path[(data_path[:,1] == 0) & (data_path[:,2] == 0)][:,6])/self.W_tot
+        else :
+            self.W_surf = 0
+        
+        # Collection de classe chemin
+        self.paths = [MC_chemin(data_path[i],pos_camera, self.W_tot) for i in range(data_path.shape[0])]        
+    
+    # Data methods ------------------------------------------------------------------------------------
+        
+    def class_selfs(self):
+        print("La simu : \n",
+              "\n pos_camera : x = %d\t" %self.pos_camera[0] \
+              + "y = %d\t" %self.pos_camera[1] + "z = %d\t" %self.pos_camera[2],
+             "\n Nbre_photon : %d" %self.Nbre_photon,
+              
+             "\n \n Stat sur les chemins : \n",
+             "\n Nbre_moyen_reflexion_exc %.2f" %self.Nbre_moyen_reflexion_exc,
+             "\n Nbre_reflexion : %d" %self.Nbre_reflexion,
+             "\n Nbre_surf : %d" %self.Nbre_surf,
+             "\n Nbre_atm : %d" %self.Nbre_atm,
+             "\n Nbre_space : %d" %self.Nbre_space,
+             "\n Nbre_reflect_surf : %d" %self.Nbre_reflect_surf,
+             "\n Nbre_reflect_atm : %d" %self.Nbre_reflect_atm,
+              
+             "\n \n Poids par catégorie : \n",
+             "\n W_tot : %f" %self.W_tot,
+             "\n W_atm : %f" %self.W_atm,
+             "\n W_surf : %f" %self.W_surf,
+             "\n W_reflechis_atm : %f" %self.W_reflechis_atm,
+             "\n W_reflechis_surf : %f" %self.W_reflechis_surf)
+        
+    def get_coord(self, coord, booli):
+        
+        if coord == 'x':
+            indice = 0
+        elif coord == 'y':
+            indice = 1
+        elif coord == 'z':
+            indice = 2
+            
+        return [self.paths[i].Pos_abs[indice] for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == booli]
+        
+    def distance_to_plane(self,phi,Pos_abs,max_dist):
+        
+        n_plan = np.array([-np.sin(phi),np.cos(phi)])
+        dist_ortho = abs(np.dot(n_plan,(Pos_abs[:2]-self.pos_camera[:2])))/np.sqrt(np.dot(n_plan,n_plan))
+        
+        if dist_ortho > max_dist :
+            return False
+        
+        else :
+            return True
+        
+    def projection_on_plane(self,phi,Pos_abs):
+        
+        t_plan = np.array([np.cos(phi), np.sin(phi)])
+        
+        return np.dot(t_plan,(Pos_abs[:2] - self.pos_camera[:2]))/np.sqrt(np.dot(t_plan,t_plan))
+    
+    
+    def coord_proj_plane(self, phi, max_dist):
+        
+        a = len(self.paths)
+            
+        Surface = [np.array([self.projection_on_plane(phi,self.paths[i].Pos_abs),self.paths[i].Pos_abs[2],self.paths[i].W]) \
+                   for i in range(a) if \
+                   (self.distance_to_plane(phi,self.paths[i].Pos_abs,max_dist) == True and \
+                    self.paths[i].Abs_surf == True)]
+        Atm = [np.array([self.projection_on_plane(phi,self.paths[i].Pos_abs),self.paths[i].Pos_abs[2],self.paths[i].W]) for i in range(a) if \
+                   (self.distance_to_plane(phi,self.paths[i].Pos_abs,max_dist) == True and \
+                    self.paths[i].Abs_surf == False)]
+    
+        return Surface, Atm
+    
+    def z_profile(self, Surface):
+        
+        z = [self.paths[i].Pos_abs[2] for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        W = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        
+        if len(z) >0 :
+                
+            paired = list(zip(z, W/self.W_tot))
+            paired_sorted = sorted(paired, key=lambda x: x[0])
+            z_sorted, var_sorted = zip(*paired_sorted)    
+            
+        else :
+            z_sorted, var_sorted = [np.nan, np.nan]
+        
+        return z_sorted, var_sorted
+    
+    def dist_profile(self, Surface):
+        
+        Dist = [self.paths[i].Dist for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        W = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        
+        if len(W) >0 :
+
+            paired = list(zip(Dist, W/self.W_tot))
+            paired_sorted = sorted(paired, key=lambda x: x[0])
+            z_sorted, var_sorted = zip(*paired_sorted)    
+        
+        else :
+            z_sorted, var_sorted = [np.nan, np.nan]
+        
+        
+        return z_sorted, var_sorted
+    
+    def Z_radiance_tot(self,z_profile,T_profile):
+
+        sigma = 5.67*(10**(-8))
+        radiance_profile = sigma*(T_profile**4)
+        
+        diff_liste = abs(radiance_profile - (self.W_atm+self.W_reflechis_atm)*(self.W_tot/self.Nbre_photon))
+        
+        indice_z = diff_liste.argmin()
+                    
+        return z_profile[indice_z]
+    
+    def Matrice_cumuls(self,z_max,r_max,n_z,n_r, surface):
+        
+        Mat_cumul = np.zeros((n_z,n_r))
+        
+        zs = np.linspace(0,z_max,n_z)
+        rs = np.linspace(0,r_max,n_r)
+        
+        Nbre_tot = self.Nbre_photon - self.Nbre_space
+                
+        for i in range(n_z):
+            for j in range(n_r):
+                                
+                Mat_cumul[i,j] = len([self.paths[k].Dist for k in range(self.Nbre_photon) if \
+                                        (self.paths[k].Abs_surf == surface) and (self.paths[k].Space == False) and \
+                                           (self.paths[k].Dist < rs[j]) and \
+                                           (self.paths[k].Pos_abs[2] - self.pos_camera[2] < zs[i])])/Nbre_tot
+        
+        return Mat_cumul,zs,rs
+    
+    def quartil_cumul_collision(self,type_,quantil):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == True and self.paths[i].Space == False]
+        
+        if len(pathes) > 0 :
+        
+            if type_ == "dist" :
+
+                Dist = np.array([pathes[i].Dist for i in range(len(pathes))])
+                res = np.percentile(Dist, quantil)
+
+            elif type_ == "alt" :
+
+                Alt = np.array([pathes[i].Pos_abs[2] for i in range(len(pathes))])
+                res = np.percentile(Alt, quantil)         
+
+            return res
+        
+        else :
+            
+            return np.nan
+    
+    
+    def quartil_cumul_flux(self,type_,quantil):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == True and self.paths[i].Space == False]   
+        
+        if len(pathes) > 0 :
+        
+            if type_ == "dist" :
+
+                Dist = np.array([pathes[i].Dist for i in range(len(pathes))])
+                W = np.array([pathes[i].W/self.Nbre_photon for i in range(len(pathes))])
+
+                paired = list(zip(Dist, W))
+                paired_sorted = sorted(paired, key=lambda x: x[0])
+                dist_sorted, W_sorted = zip(*paired_sorted)
+                W_sorted_cum = np.cumsum(W_sorted)
+                index_90 = np.argmax(W_sorted_cum > (quantil/100)*W_sorted_cum[-1])
+                return dist_sorted[index_90]
+
+            elif type_ == "alt" :
+
+
+                Alt = np.array([pathes[i].Pos_abs[2] for i in range(len(pathes))])
+                W = np.array([pathes[i].W/self.Nbre_photon for i in range(len(pathes))])
+
+                paired = list(zip(Alt, W))
+                paired_sorted = sorted(paired, key=lambda x: x[0])
+                Alt_sorted, W_sorted = zip(*paired_sorted)
+                W_sorted_cum = np.cumsum(W_sorted)
+                index_90 = np.argmax(W_sorted_cum > (quantil/100)*W_sorted_cum[-1])
+                return Alt_sorted[index_90]
+            
+        else :
+            return np.nan
+
+    def Pos_surf(self,
+                ds : xr.Dataset):
+        
+        sigma = 5.67e-8
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == True and self.paths[i].Space == False]
+        
+        if len(pathes) > 0 :
+            
+            Pos = np.array([pathes[i].Pos_abs[:2] for i in range(len(pathes))])
+            Ts = interpolate(
+                    ds = ds,
+                    points = Pos,
+                    var_name ='ts',
+                    x_dim = "x",
+                    y_dim = "y",
+                    )
+
+            return np.sum(sigma*Ts**4)/self.Nbre_photon
+        
+        else :
+            return np.nan
+        
+    def T_surf(self,
+                ds : xr.Dataset):
+        
+        sigma = 5.67e-8
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == True and self.paths[i].Space == False]
+        
+        if len(pathes) > 0 :
+            
+            Pos = np.array([pathes[i].Pos_abs[:2] for i in range(len(pathes))])
+            Ts = interpolate(
+                    ds = ds,
+                    points = Pos,
+                    var_name ='ts',
+                    x_dim = "x",
+                    y_dim = "y",
+                    )
+
+            return Ts
+        
+        else :
+            return np.nan
+        
+    def distrib_lambda(self,surface):
+        
+        if surface :
+            pathes = [self.paths[i] for i in range(len(self.paths)) if \
+                      self.paths[i].Abs_surf == surface and self.paths[i].Space == False]
+            
+        else :
+            pathes = [self.paths[i] for i in range(len(self.paths))]
+            
+        return [path.wlen for path in pathes]
+    
+# Plot methods ------------------------------------------------------------------------------------
+
+    def density_dist_profile_wlen(self, ax, surface, wlen_1, wlen_2, color, name, linestyle):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+                  self.paths[i].Abs_surf == surface and self.paths[i].Space == False\
+                  and self.paths[i].wlen > wlen_1 and self.paths[i].wlen < wlen_2]
+        
+        Dist = sorted([path.full_dist for path in pathes])
+        
+        if surface :
+            ax.plot(Dist,1-np.cumsum(np.ones(len(Dist)))/len(Dist), c = color, linestyle = linestyle)
+        
+        else :
+            ax.plot(Dist,1-np.cumsum(np.ones(len(Dist)))/len(Dist), c = color, label = name, linestyle = linestyle)
+   
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        if surface :
+            type_abs = "surface"
+        else :
+            type_abs = "atmosphère"
+        ax.set_ylabel(f'P(l > x | atm : - ; surf : -- )')
+        ax.set_xlabel('3D distance of absorption (m)')
+    
+    def density_dist_profile(self, ax, color, name):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if\
+                 self.paths[i].Abs_surf == False]
+        
+        Dist = sorted([path.full_dist for path in pathes])
+        
+        ax.plot(Dist,np.cumsum(np.ones(len(Dist)))/len(Dist), c = color, label = name)
+   
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.set_ylabel('Cumulative density')
+        ax.set_xlabel('3D distance of absorption (m)')
+        
+    def dist_profile(self, ax, surface, color, name, linestyle):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if\
+                 self.paths[i].Space == False and self.paths[i].Abs_surf == surface]
+        
+        Dist = sorted([path.full_dist for path in pathes])
+        
+        if surface :
+            ax.plot(Dist,1-np.cumsum(np.ones(len(Dist)))/len(Dist), c = color, linestyle = linestyle)
+        else :
+            ax.plot(Dist,1-np.cumsum(np.ones(len(Dist)))/len(Dist), c = color, label = name, linestyle = linestyle)
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.set_ylabel(f'P(l > x | atm - ; surf --)')
+        ax.set_xlabel('3D distance of absorption (m)')
+        
+        
+    def plot_atm_radiance_profile_4(self,ax,color,Surface, name):
+
+        z = [self.paths[i].Pos_abs[2] - self.pos_camera[2] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == Surface and self.paths[i].Space == False]
+        
+        z_sorted = sorted(z)
+        
+        Collisions = np.ones((1,len(z)))[0]
+        
+        Nbre_abs = self.Nbre_photon - self.Nbre_space
+        ax.plot(np.cumsum(Collisions)/Nbre_abs,z_sorted,c = color, linestyle = 'solid', \
+                 label = name)
+    
+    def plot_atm_radiance_profile_Planck(self,ax,color,Surface = False):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == Surface and self.paths[i].Space == False]
+
+        z = [pathes[i].Pos_abs[2] - self.pos_camera[2] for i in range(len(pathes))]
+        
+        norm = [np.sqrt(np.dot(pathes[i].Pos_abs - self.pos_camera,self.paths[i].Pos_abs - self.pos_camera)) for i in \
+                 range(len(pathes))]
+        
+        ctheta = [np.dot(pathes[i].Pos_abs - self.pos_camera,np.array([0,0,1]))/norm[i] for i in \
+                 range(len(pathes))]
+        
+        W = [ctheta[i]*pathes[i].W/np.pi for i in range(len(pathes))]
+
+        ax.scatter(W,z,c = color)
+    
+    def plot_atm_radiance_profile_3(self,ax,color,Surface, name):
+
+        z = [self.paths[i].Pos_abs[2] - self.pos_camera[2] for i in range(len(self.paths)) if \
+             self.paths[i].Abs_surf == Surface and self.paths[i].Space == False]
+        W = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        
+        paired = list(zip(z, W/self.W_tot))
+        paired_sorted = sorted(paired, key=lambda x: x[0])
+        z_sorted, var_sorted = zip(*paired_sorted)
+
+        ax.plot(np.cumsum(var_sorted),z_sorted,c = color, linestyle = 'solid', \
+                 label = name)
+                             
+    def dist_weight_4(self, ax, Surface, color, name):
+                
+        Dist = [self.paths[i].Dist for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        Dist_sorted = sorted(Dist)
+    
+        Collisions = np.ones((1,len(Dist)))[0]                  
+
+        Nbre_abs = self.Nbre_photon - self.Nbre_space
+        ax.plot(Dist_sorted,np.cumsum(Collisions)/Nbre_abs, c = color, linestyle = 'solid',\
+                label = name)
+        
+    def dist_weight_3(self, ax, Surface, color, name):
+        
+                
+        Dist = [self.paths[i].Dist for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface  and \
+            self.paths[i].Space == False]
+        
+        W = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]                
+    
+        paired = list(zip(Dist, W))
+        paired_sorted = sorted(paired, key=lambda x: x[0])
+        Dist_sorted, W = zip(*paired_sorted)    
+
+        ax.plot(Dist_sorted,np.cumsum(W)/self.W_tot, c = color, linestyle = 'solid',\
+                label = name)
+
+    def plot_atm_radiance_profile_2(self,ax,color,Surface, name,vmin,vmax):
+        
+        z = [self.paths[i].Pos_abs[2] - self.pos_camera[2] for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        W = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == Surface and \
+            self.paths[i].Space == False]
+        
+        cax = ax.scatter(W,z, s = 0.5,c = W, vmin = vmin, vmax= vmax, cmap = 'Reds', \
+                         marker = 'o', label = 'Chemins ' + name)
+        
+        ax2 = ax.twiny()            
+        paired = list(zip(z, W/self.W_tot))
+        paired_sorted = sorted(paired, key=lambda x: x[0])
+        z_sorted, var_sorted = zip(*paired_sorted)
+
+        ax2.plot(np.cumsum(var_sorted),z_sorted,c = color, linestyle = 'solid', \
+                 label = 'Cumulative relative flux ' + name)
+        Nbre_photon_abs = self.Nbre_photon - self.Nbre_space
+        ax2.plot(np.cumsum(np.ones((1,len(var_sorted))))/Nbre_photon_abs,z_sorted,c = color, \
+                   label = 'Cumulative count ' + name, linestyle = 'dashed')
+
+        ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        ax.set_xlabel('Thermal flux ($W/m^2$)')
+        ax.set_ylabel('Altitude of absorption (m)')
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        ax2.set_xlim((0,1))
+        
+        ax2.legend()
+        #ax.legend()
+       
+    def temperature_profile(self):
+    
+        directory = "/home/barroisl/edstar/Simus/"
+        fname = "ecrad_opt_prop.txt"
+        data_path = np.loadtxt(directory+fname, dtype = np.float32,skiprows = 172)
+
+        Temperatures = data_path[:165]-100
+        Altitudes = data_path[165:330]
+
+        return Temperatures, Altitudes
+    
+
+    def plot_atm_profile_2_integer_spectral(self,ax,color,vmin,vmax):
+        
+        directory = "/home/barroisl/edstar/Simus/"
+        fname = "ecrad_opt_prop.txt"
+        data_path = np.loadtxt(directory+fname, dtype = np.float32,skiprows = 172)
+
+        Temperatures = data_path[:165]
+        Altitudes = data_path[165:330]
+        
+        Temperatures = Temperatures[Altitudes > self.pos_camera[2]]
+        Altitudes = Altitudes[Altitudes > self.pos_camera[2]] - self.pos_camera[2]
+
+        sigma = 5.67*10**(-8)
+        plt.plot(sigma*Temperatures**4,Altitudes,'r')
+        
+        cax = ax.scatter(sigma*Temperatures**4,Altitudes, s = 0.5,c = 'blue', \
+                         vmin = vmin, vmax= vmax, \
+                         marker = 'o', label = 'SB')       
+        
+        """
+        Temperatures, Altitudes = self.temperature_profile()
+        
+        Paths_liste = [self.paths[i] for i in range(len(self.paths)) if \
+                      self.paths[i].Abs_atm == True and self.paths[i].Space == False]
+        
+        z = np.array([Paths_liste[i].Pos_abs[2] for i in range(len(Paths_liste))])
+        
+        sigma = 5.67*10**(-8)
+        W = sigma*np.interp(z, Altitudes, Temperatures)**4
+        
+        cax = ax.scatter(W,z, s = 0.5,c = W, vmin = vmin, vmax= vmax, cmap = 'Blues', \
+                         marker = 'o', label = 'SB')       
+        """
+        
+    def plot_atm_radiance_profile_2_clouds(self,ax,color,z_bottom_clouds,z_top_clouds,name,vmin,vmax):
+        
+        Temperatures, Altitudes = self.temperature_profile()
+        
+        Paths_liste = [self.paths[i] for i in range(len(self.paths)) if \
+                      self.paths[i].Abs_atm == True and self.paths[i].Space == False]
+           
+        if self.pos_camera[2] < z_bottom_clouds :
+            z = np.array([Paths_liste[i].Pos_abs[2] if Paths_liste[i].Pos_abs[2] < z_bottom_clouds else z_bottom_clouds \
+                 for i in range(len(Paths_liste))])
+            
+        elif self.pos_camera[2] > z_bottom_clouds and self.pos_camera[2] < z_top_clouds:
+            z = np.array([Paths_liste[i].pos_camera[2] for i in range(len(Paths_liste))])  
+            
+        else :
+            z = np.array([Paths_liste[i].Pos_abs[2] for i in range(len(Paths_liste))])
+        
+        sigma = 5.67*10**(-8)
+        W = sigma*np.interp(z, Altitudes, Temperatures)**4
+        
+        cax = ax.scatter(W,z, s = 0.5,c = W, vmin = vmin, vmax= vmax, cmap = 'Reds', \
+                         marker = 'o', label = 'Chemins ' + name)
+        
+        ax2 = ax.twiny()            
+        paired = list(zip(z, W/self.W_tot))
+        paired_sorted = sorted(paired, key=lambda x: x[0])
+        z_sorted, var_sorted = zip(*paired_sorted)
+
+        ax2.plot(np.cumsum(var_sorted),z_sorted,c = color, linestyle = 'solid', \
+                 label = 'Cumulative relative flux ' + name)
+        Nbre_photon_abs = self.Nbre_photon - self.Nbre_space
+        ax2.plot(np.cumsum(np.ones((1,len(var_sorted))))/Nbre_photon_abs,z_sorted,c = color, \
+                   label = 'Cumulative count ' + name, linestyle = 'dashed')
+
+        ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        ax.set_xlabel('Thermal flux ($W/m^2$)')
+        ax.set_ylabel('Altitude of absorption (m)')
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        ax2.set_xlim((0,1.5))
+        
+        ax2.legend()
+        #ax.legend()
+            
+    def plot_atm_radiance_profile(self,axs,Variable, save_title):
+        
+        sigma = 5.67*10**(-8)
+        
+        # Atm absorbed
+        
+        z = [self.paths[i].Pos_abs[2] for i in range(len(self.paths)) if self.paths[i].Abs_surf == False]
+        if Variable == 'W' :
+            var = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == False]
+            xlabel = 'Weight ($W/m^2$)'
+                        
+            ax2 = axs[0].twiny()            
+            paired = list(zip(z, var/self.W_tot))
+            paired_sorted = sorted(paired, key=lambda x: x[0])
+            z_sorted, var_sorted = zip(*paired_sorted)
+
+            ax2.plot(np.cumsum(var_sorted),z_sorted,c = 'r')
+            
+            ax2.plot(np.cumsum(np.ones((1,len(var))))/len(var),z_sorted,c = 'b', \
+                       label = 'Cumulative count')
+            
+            ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+            
+        elif Variable == 'T' :
+            var = [(self.paths[i].W/sigma)**(1/4) for i in range(len(self.paths)) if self.paths[i].Abs_surf == False]
+            xlabel = 'Température de radiance'
+            
+        cax = axs[0].scatter(var,z, s = 0.5,c = 'k', marker = 'o')
+        
+        axs[0].set_title('Absorbed by Atmosphere : %.2f ($W/m^2$)' %(self.W_atm*self.W_tot))
+        
+        # Surface absorbed
+        
+        if len([self.paths[i].Dist for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == True]) != 0 :
+        
+            z = [self.paths[i].Pos_abs[2] for i in range(len(self.paths)) if self.paths[i].Abs_surf == True]
+            if Variable == 'W' :
+                var = [self.paths[i].W for i in range(len(self.paths)) if self.paths[i].Abs_surf == True]
+                xlabel = 'Weight ($W/m^2$)'
+
+                ax2 = axs[1].twiny()            
+                paired = list(zip(z, var/self.W_tot))
+                paired_sorted = sorted(paired, key=lambda x: x[0])
+                z_sorted, var_sorted = zip(*paired_sorted)
+
+                ax2.plot(np.cumsum(var_sorted),z_sorted, c = 'r', \
+                            label = 'Cumulative relative weight')
+
+                ax2.plot(np.cumsum(np.ones((1,len(var))))/len(var),z_sorted,c = 'b', \
+                           label = 'Cumulative count')
+
+                ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+                ax2.legend()
+
+            elif Variable == 'T' :
+                var = [(self.paths[i].W/sigma)**(1/4) for i in range(len(self.paths)) if self.paths[i].Abs_surf == True]
+                xlabel = 'Température de radiance'
+            
+        cax = axs[1].scatter(var,z, s = 0.5,c = 'k', marker = 'o', label = Variable)  
+        
+        axs[1].set_title('Absorbed by Surface : %.2f ($W/m^2$)' %(self.W_surf*self.W_tot))
+        
+        for ax in axs :
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel('Altitude of absorption (m)')
+            ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+        plt.savefig(save_title)
+        
+    def histogramme(self,ax,variable) :
+        
+        if variable == 'Dist':
+            var = [self.paths[i].Dist for i in range(len(self.paths))]
+        elif variable == 'z':
+            var = [self.paths[i].Pos_abs[2] for i in range(len(self.paths))]
+        elif variable == 'W':
+            var = [self.paths[i].W for i in range(len(self.paths))]
+            
+        hist = ax.hist(variable, bins = np.arange(100)*100, histtype = 'step')
+
+        ax.set_ylabel('Count')
+        ax.set_xlabel('Distance to camera (m)')
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+    def threeD_scat(self, fig):
+        
+        ax = fig.add_subplot(projection='3d')
+        
+        markers = ['o','+']
+        boolis = [True, False]
+        
+        for j in range(2):
+            
+            x = self.get_coord('x', boolis[j])
+            y = self.get_coord('y', boolis[j])
+            z = self.get_coord('z', boolis[j])
+            
+            W = [self.paths[i].W for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == boolis[j]]
+
+            cax = ax.scatter(x, y, z, c = W, marker = markers[j], cmap = 'viridis', vmin = 0, vmax = 30)
+            
+        fig.colorbar(cax, label = 'Relative importance in raddiance')
+
+        ax.set_xlabel('x (m)')
+        ax.set_ylabel('y (m)')
+        ax.set_zlabel('z (m)')
+        ax.grid(False)
+        
+    def twoD_scat(self, ax, fig,save_title):
+        
+        markers = ['o','+']
+        boolis = [True, False]
+        
+        for j in range(2):
+        
+            x = self.get_coord('x', boolis[j])
+            y = self.get_coord('y', boolis[j])
+
+            W = [self.paths[i].W for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == boolis[j]]
+                        
+            cax = ax.scatter(x, y, marker = markers[j], c = W, cmap = 'viridis')
+            
+        fig.colorbar(cax, label = 'Radiance ($W/m^2$)')
+
+        ax.set_xlabel('x (m)')
+        ax.set_ylabel('y (m)')
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False) 
+        
+        plt.savefig(save_title)
+        
+    def dist_weight_2(self, ax, Surface, color, name):
+        
+        ax2 = ax.twinx()
+        
+        Dist = [self.paths[i].Dist for i in range(len(self.paths)) \
+            if self.paths[i].Abs_surf == Surface and self.paths[i].Space == False]
+
+        W = [self.paths[i].W for i in range(len(self.paths)) \
+            if self.paths[i].Abs_surf == Surface and self.paths[i].Space == False]
+
+        cax = ax.plot(Dist, W, c = color, markersize = 1, marker = 'o', label = "Chemin "+name,linestyle='')
+
+        paired = list(zip(Dist, W))
+        paired_sorted = sorted(paired, key=lambda x: x[0])
+        Dist_sorted, W = zip(*paired_sorted)    
+        
+        ax2.plot(Dist_sorted,np.cumsum(W)/self.W_tot, c = color, linestyle = 'solid',\
+                label = "Cumulative relative weight " + name)
+        
+        Nbre_photon_abs = self.Nbre_photon - self.Nbre_space
+        ax2.plot(Dist_sorted, np.cumsum(np.ones((1,len(W))))/Nbre_photon_abs,c = color, \
+                   label = 'Cumulative count ' + name, linestyle = 'dashed')
+        
+        ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        ax.set_ylabel('Weight ($W/m^2$)')
+        ax.set_xlabel('Distance of absorption (m)')
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        
+        ax2.set_ylim((0,1))
+        
+        ax2.legend()
+        
+    def dist_weight(self, axs, save_title):
+        
+        ax2 = axs[0].twinx()
+        ax3 = axs[1].twinx()
+        
+        markers = ['o','+']
+        boolis = [True, False]
+        colors = ['green','blue']
+        labels = ['Surface', 'Atm']
+                
+        for j in range(2):
+            
+            if len([self.paths[i].Dist for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == boolis[j]]) == 0 :
+                
+                j = 1
+        
+            Dist = [self.paths[i].Dist for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == boolis[j]]
+
+            W = [self.paths[i].W for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == boolis[j]]
+            
+            Azi = [self.paths[i].Azimuth for i in range(len(self.paths)) \
+                if self.paths[i].Abs_surf == boolis[j]]
+            
+                        
+            cax = axs[0].scatter(Dist, W, marker = markers[j], c = 'k')
+            
+            paired = list(zip(Dist, W))
+            paired_sorted = sorted(paired, key=lambda x: x[0])
+            Dist_sorted, W = zip(*paired_sorted)
+            
+            
+            ax2.plot(Dist_sorted,np.cumsum(W)/np.cumsum(W)[-1], c = colors[j], \
+                        label = labels[j])
+            
+            if j == 0 :
+                cax = axs[1].scatter(Dist, W, marker = markers[j], c = 'k')
+
+                ax3.plot(Dist_sorted,np.cumsum(W)/np.cumsum(W)[-1], c = colors[j], \
+                        label = labels[j])
+                            
+        W = [self.paths[i].W/self.W_tot for i in range(len(self.paths))]
+        Dist = [self.paths[i].Dist for i in range(len(self.paths))]
+        
+        paired = list(zip(Dist, W))
+        paired_sorted = sorted(paired, key=lambda x: x[0])
+        Dist_sorted, W = zip(*paired_sorted)
+
+        ax2.plot(Dist_sorted,np.cumsum(W), c = 'r', \
+                    label = 'Cumulative weight total')
+
+        ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax3.spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+        ax2.legend() 
+        
+        for i in range(2):
+            ax = axs[i]
+            ax.set_xlabel('Distance from camera (m)')
+            ax.set_ylabel('Weight')
+            ax.spines[['left','right', 'top', 'bottom']].set_visible(False) 
+        
+        plt.savefig(save_title)        
+                 
+    def plotting_pcolor_cumul(self, ax, Mat_cumul,zs,rs, norm, cmap):
+    
+        cax = ax.pcolormesh(Mat_cumul, cmap = cmap, norm = norm)
+    
+    def figure_utile(self,type_name):
+
+        fig, axs = plt.subplots(nrows = 1, ncols = 2, figsize = (12,6), layout = 'constrained')
+
+        save_title = '/home/barroisl/edstar/Simus/Output/Dist_W_15_15_10_'+type_name+'.png'
+
+        set_c.dist_weight(axs, save_title)
+
+        plt.close()
+
+        fig, axs = plt.subplots(nrows = 1, ncols = 2,figsize = (12,6), layout = 'constrained')
+
+        save_title = '/home/barroisl/edstar/Simus/Output/W_15_15_10_'+type_name+'.png'
+
+        set_c.plot_atm_radiance_profile(axs,'W',save_title)
+
+        plt.close()
+
+        fig,ax = plt.subplots(figsize = (6,6), layout = 'constrained')
+
+        save_title = '/home/barroisl/edstar/Simus/Output/W_xy_15_15_10_'+type_name+'.png'
+
+        set_c.twoD_scat(ax, fig, save_title)
+
+        plt.close()
+    
+    def plotting_rose(self,ax,grid_fact,surface,cmap,vmin,vmax,add_colorbar):
+        
+        # Structure of the diagramme
+        
+        compass_angles = np.deg2rad([0, 45, 90, 135, 180, 225, 270, 315])  # N, NE, E, SE, S, SW, W, NW
+        compass_labels = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        ax.set_xticks(compass_angles)         
+        ax.set_xticklabels(compass_labels)    
+
+        ax.set_theta_zero_location('N')       
+        ax.set_theta_direction(-1)            
+        ax.set_rticks([5])                     
+
+        for R in range(1,5): 
+            plotting_circle_labeled(R*grid_fact,ax)
+            
+        
+        #Collision points
+        
+        bounds = np.arange(vmin, vmax, (vmax-vmin)*0.1)
+        norm = colors.BoundaryNorm(boundaries=bounds, ncolors=256)
+        
+        path_considered = [self.paths[i] for i in range(len(self.paths)) if \
+                           self.paths[i].Abs_surf == surface and self.paths[i].Space == False]
+        
+        Dist = [path_considered[i].Pos_abs[2]-self.pos_camera[2] for i in range(len(path_considered))]
+        W = [path_considered[i].W for i in range(len(path_considered))]
+        Azi = [path_considered[i].Azimuth for i in range(len(path_considered))]
+        
+        cax = ax.scatter(Azi,Dist,c = W,cmap = cmap, norm = norm)
+        
+        if add_colorbar == True :
+            
+            cbar = plt.colorbar(cax, ax=ax,location='right', orientation='vertical', cmap = cmap, norm = norm)
+            cbar.set_label('Weight $W.m^{-2}$')
+            
+    def plotting_collision_map(self,ax,surface,cmap,vmin,vmax,add_colorbar):
+        
+        #Collision points
+        
+        bounds = np.arange(vmin, vmax, (vmax-vmin)*0.1)
+        norm = colors.BoundaryNorm(boundaries=bounds, ncolors=256)
+        
+        path_considered = [self.paths[i] for i in range(len(self.paths)) if \
+                           self.paths[i].Abs_surf == surface and self.paths[i].Space == False]
+        
+        x = [path_considered[i].Pos_abs[0] for i in range(len(path_considered))]
+        y = [path_considered[i].Pos_abs[1] for i in range(len(path_considered))]
+        W = [path_considered[i].W for i in range(len(path_considered))]
+        
+        cax = ax.scatter(x,y,c = W,s=1,cmap = cmap, norm = norm)
+        
+        if add_colorbar == True :
+            
+            cbar = plt.colorbar(cax, ax=ax,location='right', orientation='vertical', extend = 'max',cmap = cmap, norm = norm)
+            cbar.set_label('Thermal flux $W.m^{-2}$')
+            
+    def plotting_collision_map_2(self,ax,color):    
+        
+        path_considered = [self.paths[i] for i in range(len(self.paths)) if \
+                           self.paths[i].Abs_surf == True and self.paths[i].Space == False]
+        
+        x = [path_considered[i].Pos_abs[0] for i in range(len(path_considered))]
+        y = [path_considered[i].Pos_abs[1] for i in range(len(path_considered))]
+        W = [path_considered[i].W for i in range(len(path_considered))]
+        
+        cax = ax.scatter(x,y,c = color,s=1)
+        
+######################### Class Porp_atm #########################
+        
+def extract_marker_positions(
+    lignes : list[str],
+    marker_list : list[str],
+    offset = 0,
+    )->dict:
+    
+    index = {}
+    
+    for i,ligne in enumerate(lignes) :
+        for marker in marker_list:
+            if marker in ligne :
+                index[marker] = i + offset
+            
+    return index
+            
+def extract_between_markers(
+    file_path: str,
+    start_marker: str,
+    end_marker: str,
+    include_markers: bool = False,
+    ) -> list[float]:
+    
+    extracted = []
+    inside = False
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.rstrip("\n")
+
+            # Détection du marqueur de début
+            if not inside and start_marker in stripped:
+                inside = True
+                if include_markers:
+                    extracted.append(stripped)
+                continue  # on ne garde pas la ligne de début si include_markers=False
+
+            # Détection du marqueur de fin
+            if inside and end_marker in stripped:
+                if include_markers:
+                    extracted.append(stripped)
+                break  # on arrête la lecture dès le marqueur de fin
+
+            # Collecte des lignes situées entre les deux marqueurs
+            if inside:
+                extracted.append(float(stripped))
+
+    return extracted
+
+def contains_string(
+        lignes : list[str],
+        test : str)->bool:  #, encoding="utf-8"):
+
+    for ligne in lignes :
+        if test in ligne :
+            return True
+    
+    return False 
+
+dict_atm = {"SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds],
+            "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens],
+            "SPOSATM" : ["Polar summer", "orange","Oranges",cm.Oranges],
+            "SPOWATM" : ["Polar winter", "blue","Blues",cm.Blues],
+            "STROATM" : ["Tropics", "purple","Purples",cm.Purples],
+            "EMPTATM" : ["Transparent", "black","Greys",cm.Greys],
+            "TUXUATM" : ["Uniforme", "yellow","YlGn", cm.YlGn]}
+
+atms = list(dict_atm.keys())
+
+class Prop_atm:
+    
+    """
+    Cadre pour faciliter l'étude d'un profile atm au format ecRAD
+    """
+    
+    def __init__(self,name):
+        
+        directory = "/home/barroisl/edstar/Simus/atms/"
+        file_path = directory + "ecrad_opt_prop_"+name+".txt"
+        marker_list = ["Number of levels", "Number of layers", "Ground temperature",
+                       "Pressure","Temperature", "Altitude", "Nominal x(H2O)",
+                      "Number of water vapor concentration values","LW emissivity",
+                      "SW emissivity","Number of spectral intervals (LW)"]
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lignes = [ligne.rstrip('\n') for ligne in f]
+        
+        index = extract_marker_positions(
+                    lignes = lignes,
+                    marker_list = marker_list)
+        
+        # Name 
+        self.name = name
+            
+        # Index dictionnary
+        self.d_index = index
+            
+        # Lignes of file
+        self.lignes = lignes
+        
+        # Number of levels
+        self.N_levels = int(lignes[index["Number of levels"]+1])
+        
+        # Number of layers
+        self.N_layers = int(lignes[index["Number of layers"]+1])
+        
+        # Groud temperature
+        self.Ts = float(lignes[index["Ground temperature"]+1])
+        
+        # Number of water vapor values
+        self.N_wv = int(lignes[index["Number of water vapor concentration values"]+1])
+        
+        # LW emissivity
+        self.LW_eps = float(lignes[index["LW emissivity"]+1])
+        
+        # SW emissivity
+        self.SW_eps = float(lignes[index["SW emissivity"]+1])
+        
+        # Number of spectral intervals (LW)
+        self.N_LW_int = int(lignes[index["Number of spectral intervals (LW)"]+1])
+        
+        if self.name != "EMPTATM":
+            # Intervals of wave lengths
+            marker_list_LW_int = []
+            LW_int_edges = np.zeros((self.N_LW_int,2))
+            for i in range(self.N_LW_int):
+                if i+1 > 9 :
+                    spaces = " "
+                else :
+                    spaces = "  "
+                
+                marker_list_LW_int.append(f"LW interval index:{spaces}{i+1}")
+                
+            index_LW_int_l = extract_marker_positions(
+                        lignes = lignes,
+                        marker_list = marker_list_LW_int
+                        )
+            index_LW_int_h = extract_marker_positions(
+                        lignes = lignes,
+                        marker_list = marker_list_LW_int
+                        )
+            
+            for i in range(len(index_LW_int_h)):
+                # Le wave number k et la longueur d'onde sont inversement proportionnels
+                # Donc on inverse les deux indices de colonne de LW_int_edges
+                LW_int_edges[i,1] = (2*np.pi*1e7)/float(lignes[index_LW_int_l[marker_list_LW_int[i]]+2])
+                LW_int_edges[i,0] = (2*np.pi*1e7)/float(lignes[index_LW_int_h[marker_list_LW_int[i]]+4])
+                
+            self.LW_int_edges = LW_int_edges
+            
+        else :
+            self.LW_int_edges = np.nan
+        
+        if self.name != "EMPTATM":
+            # Nominal profiles of absorption
+            marker_list_LW_int = []
+            for i in range(self.N_LW_int):
+                if i+1 > 9 :
+                    spaces = "  "
+                else :
+                    spaces = "   "
+
+                marker_list_LW_int.append(f"Nominal absorption coefficient [m^-1] for LW interval:{spaces}{i+1} ; g-point:   1")
+
+            index_LW_int = extract_marker_positions(
+                        lignes = lignes,
+                        marker_list = marker_list_LW_int)
+
+            Abs_profiles = np.zeros((self.N_layers,self.N_LW_int))
+
+            for i,LW_int in enumerate(marker_list_LW_int):
+                Abs_profiles[:,i] = lignes[index_LW_int[LW_int]+1:index_LW_int[LW_int]+31]
+
+            self.abs_profiles = Abs_profiles
+        else :
+            self.abs_profiles = np.nan
+        
+    def g_for_LW_int(self):
+        
+        d_g = {}
+        
+        spaces_g = "   "
+        spaces_x = "  "
+        spaces_LW = "   "
+        for LW_int in tqdm(range(self.N_LW_int)):
+            g_point = 1
+            spaces_g = "   "
+            if LW_int > 9 :
+                spaces_LW = "  "
+            string_test = "Water absorption coefficient [m^-1] for LW interval:"+spaces_LW+\
+                       f"{LW_int+1} ; g-point:"+spaces_g+f"{g_point} ; x-point:"+spaces_x+f"{1}"
+            while contains_string(
+                lignes = self.lignes,
+                test = string_test) == True :
+                g_point +=1
+                if g_point > 9 :
+                    spaces_g = "  "
+                string_test = "Water absorption coefficient [m^-1] for LW interval:"+spaces_LW+\
+                       f"{LW_int+1} ; g-point:"+spaces_g+f"{g_point} ; x-point:"+spaces_x+f"{1}"
+
+            d_g[LW_int+1] = g_point-1
+            
+        return d_g
+            
+    def profiles(self,
+                variable : str)->np.ndarray:
+        
+        if variable == "T":
+            starting_ligne = self.d_index["Temperature"]+1
+            
+        elif variable == "P":
+            starting_ligne = self.d_index["Pressure"]+1
+            
+        elif variable == "x":
+            starting_ligne = self.d_index["Nominal x(H2O)"]+1
+            
+        elif variable == "z":
+            starting_ligne = self.d_index["Altitude"]+1
+            
+        return np.array(self.lignes[starting_ligne:starting_ligne+self.N_layers],\
+                        dtype = np.float32)
+        
+    def profile_w_abs_coef(self,
+                LW_interval : int,
+                g_point : int,
+                x_point : int)->np.ndarray:
+        
+        spaces_LW = "   "
+        spaces_g = "   "
+        spaces_x = "  "
+        if LW_interval > 9 :
+            spaces_LW = spaces_LW[:-1]
+        if g_point > 9 :
+            spaces_g = spaces_g[:-1]
+        if x_point > 9 :
+            spaces_x = spaces_x[:-1]
+            
+        marker_list = ["Water absorption coefficient [m^-1] for LW interval:"+spaces_LW+\
+                       f"{LW_interval} ; g-point:"+spaces_g+f"{g_point} ; x-point:"+spaces_x+f"{x_point}"]
+
+        index = extract_marker_positions(
+                    lignes = self.lignes,
+                    marker_list = marker_list)
+        
+        return np.array(self.lignes[index[marker_list[0]]+1:index[marker_list[0]]+1+self.N_layers],\
+                        dtype = np.float32)
+        
+    ######################## Dictionnary #################################
+    
+    def d_ka_LW(self):
+        
+        d_ka_LW = {}
+        d_g = self.g_for_LW_int()
+        
+        for LW_int in tqdm(range(self.N_LW_int)):
+            for x_point in range(self.N_wv):
+                for g_point in range(d_g[LW_int+1]):
+                    d_ka_LW[f"{int(LW_int)+1}_{int(g_point)+1}_{int(x_point)+1}"] = self.profile_w_abs_coef(
+                                                                    LW_interval = LW_int+1,
+                                                                    g_point = g_point+1,
+                                                                    x_point = x_point+1)
+        return d_ka_LW
+                      
+    ######################## Plotting ####################################
+    
+    def plotting_LW_abs_coeff_profile(self, 
+                ax,
+                LW_interval : int,
+                g_point : int,
+                x_point : int,
+                y_lim):
+        
+        x = self.profile_w_abs_coef(
+                LW_interval = LW_interval,
+                g_point = g_point,
+                x_point = x_point)
+        y = self.profiles(variable = "z")
+        
+        ax.plot(x, y, color = dict_atm[self.name][1])
+                
+        label = f" - LW = {LW_interval};g = {g_point}; w = {x_point}"
+        ax.set_title(dict_atm[self.name][0]+label)
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.set_ylabel('Altitude (m)')
+        ax.set_xlabel('$k_a$ $(m^{-1})$')
+        ax.set_ylim(y_lim)
+        
+    def plotting_LW_abs_coeff_profile_interact(self, 
+                LW_interval : int,
+                g_point : int,
+                x_point : int):
+        
+        plt.close()
+        
+        fig, ax = plt.subplots(figsize = (5,5), layout = 'constrained')
+
+        x = d.item().get(f"{int(LW_interval)}_{int(g_point)}_{int(x_point)}")
+        y = self.profiles(variable = "z")
+        
+        y_lim = (None,None)
+        x_lim = (0,1e-5)
+        
+        ax.plot(x, y, color = dict_atm[self.name][1])
+                
+        label = f" - LW = {int(LW_interval)};g = {int(g_point)}; x = {int(x_point)}"
+        ax.set_title(dict_atm[self.name][0]+label)
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.set_ylabel('Altitude (m)')
+        ax.set_xlabel('$k_a$ $(m^{-1})$')
+        ax.set_ylim(y_lim)
+        #ax.set_xlim(x_lim)
+        
+        plt.show()
+        
+        
+############################ Plotting ################################## 
+
+params = {'legend.fontsize': 'x-large',
+          #'figure.figsize': (15, 5),
+         'axes.labelsize': 'x-large',
+         'axes.titlesize':'x-large',
+         'xtick.labelsize':'x-large',
+         'ytick.labelsize':'x-large'}
+pylab.rcParams.update(params)
+
+
+######################### Other stuff ###################################
+
+H = 6.62607015e-34   # Planck constant      [J·s]
+C = 2.99792458e8     # Speed of light        [m/s]
+KB = 1.380649e-23    # Boltzmann constant    [J/K]
+sigma = 5.67e-8
+
+@nb.njit(cache = True)
+def Planck_law(
+    wavelength: float | np.ndarray, 
+    temperature: float) -> float | np.ndarray:
+              
+    return (2 * H * C**2 / wavelength**5) / (np.exp(H * C / (wavelength * KB * temperature)) - 1)  
+    
+    
+##################### Plotting Stuff ########################################################
+
+
+
+
+
+
+
