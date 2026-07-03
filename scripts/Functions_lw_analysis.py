@@ -10,6 +10,7 @@ import numba as nb
 from numba import prange
 from matplotlib import cm
 import matplotlib.colors as colors
+from matplotlib.colors import LogNorm
 import math
 import time
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
@@ -526,6 +527,39 @@ class MC_Set:
             pathes = [self.paths[i] for i in range(len(self.paths))]
             
         return [path.wlen for path in pathes]
+        
+    def lambda_exchange(self,z):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+                      self.paths[i].Abs_atm == True]
+                      
+        dz = z[1]-z[0]
+        res = [[] for i in range(z.size -1)]
+        for path in pathes :
+            index_z = int(path.Pos_abs[2]//dz)
+            if index_z >= (z.size-1) :
+                index_z = int(len(res)-1)
+            res[index_z].append(path.wlen/1000) # µm
+            
+        return res
+        
+    def energy_exchange(self,z):
+        
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+                      self.paths[i].Abs_atm == True]
+                      
+        dz = z[1]-z[0]
+        res = np.zeros(z.size-1)
+        for path in pathes :
+            index_z = int(path.Pos_abs[2]//dz)
+            if index_z >= (z.size-1) :
+                index_z = int(len(res)-1)
+                
+            res[index_z] += path.W/self.Nbre_photon
+            
+        return res
+        
+
     
 # Plot methods ------------------------------------------------------------------------------------
 
@@ -1107,6 +1141,259 @@ class MC_Set:
         
         cax = ax.scatter(x,y,c = color,s=1)
         
+    def tab_lambda_z_flux(self,z,LW_int_edges):
+    
+        res = np.zeros((z.size-1,LW_int_edges.shape[0]-1)) # on prend en compte aussi les rayon arrivant en dessous de la caméra
+        dz = z[1]-z[0]
+    
+        pathes = [self.paths[i] for i in range(len(self.paths)) if \
+                      self.paths[i].Abs_atm == True]
+                      
+        for path in pathes :
+            index_z = int(path.Pos_abs[2]//dz)
+            if index_z >= (z.size-1) :
+                index_z = int(len(res)-1)
+            
+            mask = (10000/(LW_int_edges[:, 1]) <= path.wlen/1000) & \
+                (path.wlen/1000 <= 10000/(LW_int_edges[:, 0]))
+            index_lambda = np.where(mask)[0]
+
+            res[index_z,index_lambda] += path.W/self.Nbre_photon
+                    
+        return res
+        
+def plotting_flux_profile_all_cams(
+            exp :str,
+            res : str,
+            n_cam : str,
+            lr : str,
+            force_save : bool = False,
+            save_name : str = ' ',
+            z : np.ndarray = np.arange(0,10e3,100),
+            step :int = 1000):
+
+    dz = z[1] - z[0]
+    n_bins = z.size -1
+
+    fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(12, 6), layout='constrained')
+
+    im = None 
+
+    for j,atm in enumerate(["SMLSATM","SMLWATM"]):
+
+        dire = f"/home/barroisl/Transect_MC_auto/Data/{exp}_{res}_{n_cam}_atms_{lr}_emis/{atm}/"
+        print(dire)
+        list_ = os.listdir(dire)
+
+        res_ = np.zeros((z.size-1, len(list_)))
+        alt_cams = np.zeros(len(list_))
+
+        for d,dossier in tqdm(enumerate(list_)):
+            dat = np.loadtxt(dire +f"/{dossier}/{dossier}_50_15_15.txt")
+            cam = np.loadtxt(dire +f"/{dossier}/{dossier}_camera_tgt.txt")
+
+            mc_set = MC_Set(dat,cam[:3])
+            alt_cams[d] = cam[2]
+            res_[:,d] = mc_set.energy_exchange(z)
+
+        im = axs[j].pcolormesh(
+                res_,
+                norm=LogNorm(vmin=1e-7, vmax=1e2),
+                cmap='binary',
+                shading='auto')
+        
+        axs[j].scatter(np.arange(alt_cams.size), alt_cams/dz, color = 'dodgerblue', marker = "*")
+
+        # --- Y ticks every 500 m ---
+        if j == 0 :
+            step_bins = int(step / dz)  # number of bins per 500 m
+            ytick_positions = np.arange(0, n_bins + 1, step_bins)
+            ytick_labels = [f"{int(z[i])} m" for i in ytick_positions]
+
+            axs[j].set_yticks(ytick_positions)
+            axs[j].set_yticklabels(ytick_labels, fontsize=12)
+        else :
+            axs[j].set_yticks([])
+            axs[j].set_ylabel('')
+
+        # --- X ticks: spectral intervals indexed 1 to 16 ---
+        axs[j].set_xticks([])
+        axs[j].set_xlabel(" ")
+
+        axs[j].set_title(atm)
+        axs[j].spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+    # --- Shared colorbar on the right, for the whole figure ---
+    fig.colorbar(im, ax=axs, location='right', label='Flux ($W.m^{-2}$)')
+
+    if force_save :
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{save_name}.png")
+
+    plt.show()
+    
+
+
+def plotting_spectral_energy_exchange(z : np.ndarray,
+                                      dossier :str,
+                                     step : int,
+                                     force_save : bool = False,
+                                     save_name : str =' '):
+    
+    dz = z[1] - z[0]
+    n_bins = z.size - 1
+
+    fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(12, 6), layout='constrained')
+
+    im = None  # will hold the last mappable for the shared colorbar
+
+    for j, atm in enumerate(atms[1:3]):
+        if atm != "EMPTATM" and atm != "TUXUATM":
+            dat = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_50_15_15.txt")
+            cam = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_camera_tgt.txt")
+            mc_set = MC_Set(dat, cam[:3])
+            
+            axs[j].hlines(cam[2]/dz,0,15,linestyle = "dashed", color = 'dodgerblue')
+
+            prop_atm = Prop_atm(atm)
+            tab = mc_set.tab_lambda_z_flux(z=z, LW_int_edges=prop_atm.LW_int_edges)
+
+            im = axs[j].pcolormesh(
+                tab,
+                norm=LogNorm(vmin=1e-7, vmax=1e2),
+                cmap='binary',
+                shading='auto')
+
+            # --- Y ticks every 500 m ---
+            if j == 0 :
+                step_bins = int(step / dz)  # number of bins per 500 m
+                ytick_positions = np.arange(0, n_bins + 1, step_bins)
+                ytick_labels = [f"{int(z[i])} m" for i in ytick_positions]
+
+                axs[j].set_yticks(ytick_positions)
+                axs[j].set_yticklabels(ytick_labels, fontsize=12)
+            else :
+                axs[j].set_yticks([])
+                axs[j].set_ylabel('')
+
+            # --- X ticks: spectral intervals indexed 1 to 16 ---
+            n_spectral = tab.shape[1]
+            xtick_positions = np.arange(n_spectral) + 0.5  # center of each column
+            xtick_labels = [str(k) for k in range(1, n_spectral + 1)]
+
+            axs[j].set_xticks(xtick_positions)
+            axs[j].set_xticklabels(xtick_labels, fontsize=12)
+
+            axs[j].set_title(atm)
+            axs[j].spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+    # --- Shared colorbar on the right, for the whole figure ---
+    fig.colorbar(im, ax=axs, location='right', label='Flux ($W.m^{-2}$)')
+    
+    if force_save :
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{save_name}.png")
+
+    plt.show()
+    
+def plot_lambda_filter(
+    Planck : bool,
+        force_save : bool,
+        save_name : str):
+    
+    path_dir = "/home/barroisl/Transect_MC_auto/Data/guiers_250_144_atms/"
+    
+    fig, axs = plt.subplots(nrows = 2, ncols = 1, figsize = (12,6), layout = 'constrained')
+    
+    for i,atm in enumerate(atms):
+        
+        bins = np.linspace(4,40,240)
+        
+        if atm != "TUXUATM" : #and atm != "EMPTATM":
+            
+            data = np.loadtxt(path_dir + atm +'/11/11_50_15_15.txt')
+            pos_camera = np.loadtxt(path_dir + atm +'/11/11_camera_tgt.txt')[:3]
+            mc_set = MC_Set(data, pos_camera)
+            
+            if atm == "EMPTATM" : 
+                lambdas = np.array(mc_set.distrib_lambda(False))*1e-3
+                axs[0].hist(lambdas, bins = bins, histtype = 'step', color = 'k', \
+                            density = True, label = 'Initial spectrum')
+            
+            lambdas_surf = np.array(mc_set.distrib_lambda(True))*1e-3
+            axs[1].hist(lambdas_surf, bins = bins, histtype = 'step',linestyle = 'solid', \
+                    color = dict_atm[atm][1],label = dict_atm[atm][0], density = False, alpha = 0.6)
+    
+    ### Planck
+    if Planck :
+        wavelength = np.linspace(4e-6,40e-6,2000)
+        T = 275
+
+        Planck = Planck_law(
+            wavelength = wavelength, 
+            temperature = T)
+        axs[0].plot(wavelength*1e6,0.065*Planck/max(Planck),color = 'firebrick', label = "Planck distribution")
+    
+    for ax in axs :
+        ax.set_yticks([])
+        ax.set_xlabel('$\lambda$ [$\mu m$]')
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.legend()
+        
+    axs[0].set_ylabel('Density')
+    axs[1].set_ylabel('Count')
+        
+    if force_save :
+    
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/guiers_250_144_atms/{save_name}.jpg")
+        
+def plotting_spectral_dist(z : np.ndarray,
+                         dossier :str,
+                         force_save : bool = False,
+                         save_name : str =' '):
+    
+    dz = z[1] - z[0]
+    n_bins = z.size - 1
+    
+    bins = np.linspace(4,40,240)
+    indices_h = [0,1,2,3]
+    colors_ = ["lightblue","steelblue","dodgerblue","darkblue"]
+
+    fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(18, 6), layout='constrained')
+
+    im = None  # will hold the last mappable for the shared colorbar
+
+    for j, atm in enumerate(atms[1:3]):
+        if atm != "EMPTATM" and atm != "TUXUATM":
+            dat = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_50_15_15.txt")
+            cam = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_camera_tgt.txt")
+            mc_set = MC_Set(dat, cam[:3])
+
+            lambda_dist_lists = mc_set.lambda_exchange(z)
+            for k,ind in enumerate(indices_h) :
+                axs[j].hist(lambda_dist_lists[ind], bins = bins, histtype = 'step',linestyle = 'solid', \
+                                    color = colors_[k],label = f"{z[k]} m", density = False, linewidth = 1)
+                
+            axs[j].set_title(atm)
+            axs[j].spines[['left','right', 'top', 'bottom']].set_visible(False)
+            
+            
+            data = np.loadtxt("/home/barroisl/Transect_MC_auto/Data/guiers_250_144_atms/EMPTATM/11/11_50_15_15.txt")
+            pos_camera = np.loadtxt("/home/barroisl/Transect_MC_auto/Data/guiers_250_144_atms/EMPTATM/11/11_camera_tgt.txt")[:3]
+            mc_set = MC_Set(data, pos_camera)
+
+            lambdas = np.array(mc_set.distrib_lambda(False))*1e-3
+            axs[j].hist(lambdas, bins = bins, histtype = 'step', color = 'k', \
+                        density = False, label = 'Initial spectrum')
+            
+            axs[j].set_ylabel('Count')
+            axs[j].set_yticks([])
+            axs[j].set_xlabel("$\lambda$ [$\mu m$]")
+            axs[j].legend()
+    
+    if force_save :
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{save_name}.png")
+
+    plt.show()
+        
 ######################### Class Porp_atm #########################
         
 def extract_marker_positions(
@@ -1117,9 +1404,10 @@ def extract_marker_positions(
     
     index = {}
     
-    for i,ligne in enumerate(lignes) :
+    for i, ligne in enumerate(lignes):
         for marker in marker_list:
-            if marker in ligne :
+            stripped = ligne.strip()
+            if marker in stripped and 'x-point' not in stripped:
                 index[marker] = i + offset
             
     return index
@@ -1167,13 +1455,20 @@ def contains_string(
     
     return False 
 
-dict_atm = {"SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds],
+"""
+dict_atm = {"SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds, ],
             "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens],
             "SPOSATM" : ["Polar summer", "orange","Oranges",cm.Oranges],
             "SPOWATM" : ["Polar winter", "blue","Blues",cm.Blues],
             "STROATM" : ["Tropics", "purple","Purples",cm.Purples],
             "EMPTATM" : ["Transparent", "black","Greys",cm.Greys],
             "TUXUATM" : ["Uniforme", "yellow","YlGn", cm.YlGn]}
+"""
+
+dict_atm = {"EMPTATM" : ["Transparent", "black","Greys",cm.Greys],
+            "SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds],
+            "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens],
+            "TUXUATM" : ["Uniforme", "blue","Blues", cm.Blues]}
 
 atms = list(dict_atm.keys())
 
@@ -1253,8 +1548,10 @@ class Prop_atm:
             for i in range(len(index_LW_int_h)):
                 # Le wave number k et la longueur d'onde sont inversement proportionnels
                 # Donc on inverse les deux indices de colonne de LW_int_edges
-                LW_int_edges[i,1] = (2*np.pi*1e7)/float(lignes[index_LW_int_l[marker_list_LW_int[i]]+2])
-                LW_int_edges[i,0] = (2*np.pi*1e7)/float(lignes[index_LW_int_h[marker_list_LW_int[i]]+4])
+                #LW_int_edges[i,1] = (2*np.pi*1e7)/float(lignes[index_LW_int_l[marker_list_LW_int[i]]+2])
+                #LW_int_edges[i,0] = (2*np.pi*1e7)/float(lignes[index_LW_int_h[marker_list_LW_int[i]]+4])
+                LW_int_edges[i,0] = float(lignes[index_LW_int_l[marker_list_LW_int[i]]+2])
+                LW_int_edges[i,1] = float(lignes[index_LW_int_l[marker_list_LW_int[i]]+4])
                 
             self.LW_int_edges = LW_int_edges
             
@@ -1354,7 +1651,59 @@ class Prop_atm:
         
         return np.array(self.lignes[index[marker_list[0]]+1:index[marker_list[0]]+1+self.N_layers],\
                         dtype = np.float32)
+                        
+    def w_g(self,LW_int_number : int)-> np.ndarray:
+        spaces_LW = "  "
+        if LW_int_number > 9 :
+            spaces_LW = " "
+        marker_list = [f'LW interval index:{spaces_LW}{LW_int_number}']
+
+        index = extract_marker_positions(
+                    lignes = self.lignes,
+                    marker_list = marker_list)
+                    
+        N_quadrature_weights = int(self.lignes[index[marker_list[0]]+6])
+                    
+        return np.array(self.lignes[index[marker_list[0]]+8:index[marker_list[0]]+8+N_quadrature_weights],\
+                        dtype = np.float32)
+                        
+    def Number_g_point(self,LW_int_number : int) -> int:
         
+        spaces_LW = "  "
+        if LW_int_number > 9 :
+            spaces_LW = " "
+        marker_list = [f'LW interval index:{spaces_LW}{LW_int_number}']
+
+        index = extract_marker_positions(
+                    lignes = self.lignes,
+                    marker_list = marker_list)
+                    
+        N_quadrature_weights = int(self.lignes[index[marker_list[0]]+6])
+        
+        return N_quadrature_weights
+        
+        
+    def k_g_nb(self,LW_int_number : int,g_point : int)-> np.ndarray:
+                   
+        # Extracting the k_eff profile for the given quadrature point and spectral interval
+        spaces_LW = "   "
+        spaces_g = "   "
+        if LW_int_number > 9 :
+            spaces_LW = spaces_LW[:-1]
+        if g_point > 9 :
+            spaces_g = spaces_g[:-1]
+                
+        marker_list = ["Nominal absorption coefficient [m^-1] for LW interval:"+spaces_LW+\
+                           f"{LW_int_number} ; g-point:"+spaces_g+f"{g_point}"]
+                           
+        index = extract_marker_positions(
+                    lignes = self.lignes,
+                    marker_list = marker_list)
+
+        return np.array(self.lignes[index[marker_list[0]]+1:index[marker_list[0]]+31],\
+                        dtype = np.float32) 
+    
+            
     ######################## Dictionnary #################################
     
     def d_ka_LW(self):
@@ -1390,7 +1739,7 @@ class Prop_atm:
                 
         label = f" - LW = {LW_interval};g = {g_point}; w = {x_point}"
         ax.set_title(dict_atm[self.name][0]+label)
-        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        c
         ax.set_ylabel('Altitude (m)')
         ax.set_xlabel('$k_a$ $(m^{-1})$')
         ax.set_ylim(y_lim)
@@ -1421,6 +1770,104 @@ class Prop_atm:
         #ax.set_xlim(x_lim)
         
         plt.show()
+        
+    def tab_k_z_nb(self)->np.ndarray:
+
+        tab_lambda_z = np.zeros((self.N_layers,self.N_LW_int))
+
+        for nb in range(1,self.N_LW_int+1):
+            # poids de chaque g-point par bande
+            weights = self.w_g(nb)
+            for g in range(1,self.Number_g_point(nb)+1):
+                # profile de k_a en fonction de l'altitude pour un g et un nb
+                nominal_k = self.k_g_nb(LW_int_number =nb ,g_point =g) 
+                # profile de k_eff somme pondérée par le w_g
+                tab_lambda_z[:,nb-1] += weights[g-1]*nominal_k
+
+        return tab_lambda_z
+
+    def plotting_2D_ka(self,axs,ax,colorbar : bool = False, up_label : bool = False, force_save  : bool= False, save_name : str = ' ',
+                       x_lab : bool = False, y_lab : bool = False):
+
+        alt_km = self.profiles(variable = "z")*1e-3
+        bands = self.LW_int_edges
+        arr_nb_z = self.tab_k_z_nb()
+
+        im = ax.pcolormesh(
+            np.arange(1, arr_nb_z.shape[1] + 1),  
+            alt_km,                                  
+            arr_nb_z,                             
+            norm=LogNorm(vmin=1e-7, vmax=1e0),
+            cmap='binary',
+            shading='auto'
+        )
+        if colorbar :
+            cbar = plt.colorbar(im, ax=axs)
+            cbar.set_label('$k_a$ [m⁻¹]')
+
+        if x_lab :
+            ax.set_xlabel('Bande spectrale LW')
+            ax.set_xticks(range(1, arr_nb_z.shape[1] + 1))
+        else :
+            ax.set_xticks([])
+        if y_lab :
+            ax.set_ylabel('Altitude [km]')
+        else :
+            ax.set_yticks([])
+
+        if up_label :
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim())
+            ax2.set_xticks(range(1, arr_nb_z.shape[1] + 1))
+            ax2.set_xticklabels([f"{b[0]}-{b[1]} µm" for b in bands], fontsize=15, rotation=45, ha='left')
+            #ax2.set_xlabel('Intervalle [cm⁻¹]')
+
+        if force_save :
+            plt.savefig(save_name)
+    """        
+    def plot_ka_lambda(self, alt : float, force_save = False : bool, save_name = ' ' : str):
+            
+        alt_km = self.profiles(variable = "z")*1e-3
+        bands = self.LW_int_edges
+        arr_nb_z = self.tab_k_z_nb()
+        
+        fig, ax = plt.subplots(figsize=(10, 6), layout = 'constrained')
+        
+        lams = 10000 / ((bands[:,0] + b[:,1]) / 2)
+    """
+        
+        
+
+    def plot_ka_profile(self,force_save : bool = False, save_name : str = ' '):
+
+        alt_km = self.profiles(variable = "z")*1e-3
+        bands = self.LW_int_edges
+        arr_nb_z = self.tab_k_z_nb()
+
+        fig, ax = plt.subplots(figsize=(10, 6), layout = 'constrained')
+
+        n_z,nb = arr_nb_z.shape
+
+        colors = cm.rainbow(np.linspace(0, 1, nb))
+
+        for i, col in enumerate(colors):
+            b = bands[i - 1]
+            k = arr_nb_z[:,i - 1]  # shape (n_layers,)
+            lam = 10000 / ((b[0] + b[1]) / 2)
+            ax.plot(np.maximum(k, 1e-12), alt_km, color=col, lw=2,
+                    label=f"LW{i+1} ({b[0]}-{b[1]} cm⁻¹, ~{lam:.1f}µm)")
+
+        ax.set_xlabel('$k_a$ [m⁻¹]')
+        ax.set_ylabel('Altitude [km]')
+        ax.set_xscale('log')  # log on x axis only
+        ax.set_title(dict_atm[self.name][0])
+        ax.set_ylim(0, 50)
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+        if force_save :
+            plt.savefig(save_name)
         
         
 ############################ Plotting ################################## 
@@ -1515,7 +1962,7 @@ def plot_lambda_filter(
             
             lambdas_surf = np.array(mc_set.distrib_lambda(True))*1e-3
             axs[1].hist(lambdas_surf, bins = bins, histtype = 'step',linestyle = 'solid', \
-                    color = dict_atm[atm][1],label = dict_atm[atm][0], density = True)
+                    color = dict_atm[atm][1],label = dict_atm[atm][0], density = False)
     
     ### Planck
     if Planck :
@@ -2224,7 +2671,7 @@ def plot_MC_symoblique_test(
     cax = ax.scatter(topo_flux[:,dict_map["f_surf"]]*topo_flux[:,dict_map["flux"]]/(15*15*50),\
                      epsilon_surf*topo_flux[:,dict_map["CN"]], c = dict_atm[atm][1], label = dict_atm[atm][0],\
                     alpha = alpha)#c = c, cmap = 'RdBu_r', vmin = -2, vmax = 2, marker = 'o', s = 15)
-    ax.plot([0,40],[0,40],linestyle = 'dashed', color = 'k', linewidth = 1)
+    ax.plot([0,200],[0,200],linestyle = 'dashed', color = 'k', linewidth = 1)
 
     """
     cmap = mpl.cm.RdBu_r
@@ -2248,7 +2695,7 @@ def plot_MC_symoblique_test(
         y_fit = model.predict(X_fit)
         ax.plot(X_fit, y_fit, color='red', alpha = 0.5, linestyle = 'dashed') #, label=f"y={round(a[0][0],2)}*x {round(b,2)}")
 
-    ax.set_ylabel('Surface LW radiative flux density $\sigma T^4$ ($W.m^{-2}$)')
+    ax.set_ylabel('$\epsilon \sigma T^4$ ($W.m^{-2}$)')
     #ax.set_xlabel('Surface LW radiative flux density htrdr ($W.m^{-2}$)')
     ax.set_xlabel('')
     #ax.set_title('Densité de flux radiatif dû à la surface pour MC vs atm gris')
@@ -2295,15 +2742,33 @@ def  plotting_basic_stats(
         exp : str,
         res : str,
         n_cam : str,
+        lapse_rate : bool,
         save_name : str,
+        atm : str,
         force_save = False):
     
-    taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
-    taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
+    if exp == "lavey":
+        if lapse_rate :
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_surf.npy")
+            taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_atm.npy")
+            
+        else :
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf.npy")
+            taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm.npy")          
+    else :
+    
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
     
     n_cam,n_atm = taux_atm.shape
-    index_atm = 1 #SMLSATM
-    index_EMPTATM = 5
+    if atm == "SMLSATM":
+        index_atm = 1
+    elif atm == "SMLWATM":
+        index_atm = 2 
+    elif atm == "TUXUATM" :
+        index_atm = 3
+
+    index_EMPTATM = 0
     
     fig,ax = plt.subplots(figsize = (12,4), layout = 'constrained')
     
@@ -2318,25 +2783,39 @@ def  plotting_basic_stats(
             color = 'lightcoral',label = 'Transparent atm surface')
     
     ax.set_xlabel("Index caméra")
-    ax.set_ylabel("Taux absorption (%)")
+    ax.set_ylabel("Origine des chemins (%)")
     ax.legend()
     
     ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
     
-    ax.set_title(f'Guiers : res = {res}m, n_cam = {n_cam}, atm = SMLSATM', fontsize = 15)
+    ax.set_title(f'{exp} : res = {res}m, n_cam = {n_cam}, atm = {dict_atm[atm][0]}', fontsize = 15)
     
     if force_save :
-        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/{save_name}.png")
+        if exp == "lavey" and lapse_rate :
+            plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/{save_name}.png")
+        elif exp == 'lavey' and not lapse_rate :
+            plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/{save_name}.png")
+        elif exp != "lavey" :
+            plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/{save_name}.png")
         
 def view_factors(        
         exp : str,
         res : str,
         n_cam : str,
+        lapse_rate : bool,
         save_name : str,
         force_save = False):
+        
+    if exp == "lavey":
+        if lapse_rate :
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_surf.npy")
+        else :
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf.npy")
+            
+    else :
     
-    taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
-    taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
         
     n_cam,n_atm = taux_atm.shape
     index_atm = 1 #SMLSATM
@@ -2389,31 +2868,48 @@ def plotting_atms_SVF_and_flux(
         lapse_rate : bool,
         force_save = False):
     
-    if lapse_rate == True :
+    if exp == "lavey" and lapse_rate :
     
-        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_T/flux_surf.npy")
-        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_T/taux_surf.npy")
-        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_T/taux_atm.npy")
-        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_T/flux_atm.npy")
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/flux_atm.npy")
 
-    else :
+    elif exp == "lavey" and not lapse_rate :
         
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/flux_atm.npy")
+        
+    elif exp != "lavey" :
+   
         flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_surf.npy")
         taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
         taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
-        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_atm.npy")  
         
     topo_params = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/topo_polygon_{exp}_{res}_{n_cam}.txt")
+    
+    
 
     fig,axs = plt.subplots(nrows = 2, ncols = 1, figsize = (12,6), layout = 'constrained')
-
-    for i,atm in enumerate(atms[:-1]):
+    
+    dict_atm = {"SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds, ],
+            "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens],
+            "SPOSATM" : ["Polar summer", "orange","Oranges",cm.Oranges],
+            "SPOWATM" : ["Polar winter", "blue","Blues",cm.Blues],
+            "STROATM" : ["Tropics", "purple","Purples",cm.Purples],
+            "EMPTATM" : ["Transparent", "black","Greys",cm.Greys],
+            "TUXUATM" : ["Uniforme", "yellow","Blues", cm.Blues]}
+    atms = ["SMLSATM", "SMLWATM","SPOSATM","SPOWATM","STROATM","EMPTATM","TUXUATM"]
+    for i,atm in enumerate(atms):
         
         if atm == "TUXUATM":
-            fact = 3.5
+            fact = 0.5
         else :
             fact = 1
-
+	
 
         axs[0].scatter(topo_params[:,0],(1-taux_surf[:,i]), marker = '*', s = 70, c = dict_atm[atm][1],\
                        label = dict_atm[atm][0], alpha = 0.7) #topo_params[:,-1]
@@ -2449,8 +2945,19 @@ def plotting_atms_SVF_and_flux(
     dire = "/home/barroisl/Transect_MC_auto/"
     
     if force_save == True :
+    
+        if exp == 'lavey' and lapse_rate :
 
-        plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms/{save_name}.jpg")
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_65_emis/{save_name}.jpg")
+           
+        elif exp == 'lavey' and not lapse_rate :
+        
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_00_emis/{save_name}.jpg")
+            
+        elif exp != "lavey" :
+        
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms/{save_name}.jpg")
+            
    
 """     
 plotting_atms_SVF_and_flux(
@@ -2484,10 +2991,10 @@ def correlation_htrdr_model(
         else :
             grad = '00'
     
-        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}/flux_surf.npy")
-        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}/taux_surf.npy")
-        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}/taux_atm.npy")
-        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}/flux_atm.npy")
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_atm.npy")
 
     else :
         flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_surf.npy")
@@ -2499,6 +3006,11 @@ def correlation_htrdr_model(
     cam_tgt = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/polygon_{exp}_{res}_{n_cam}.txt")
 
     fig,axs = plt.subplots(nrows = 2, ncols = 1, figsize = (12,6), layout = 'constrained')
+    
+    emissivities = {"EMPTATM" : 0,
+                    "TUXUATM" : 0.98,
+                    "SMLSATM" : 0.62,
+                    "SMLWATM" : 0.62}
 
     for i,atm in enumerate(atms):
         
@@ -2509,10 +3021,10 @@ def correlation_htrdr_model(
             prop_atm = Prop_atm(atm)
             T_profile = prop_atm.profiles(variable = "T")
             z_profile = prop_atm.profiles(variable = "z")     
-            T = np.interp(topo_params[:,-1], z_profile, T_profile)
+            T = np.interp(topo_params[:,-1], z_profile, T_profile) #-6.5 # pour prendre la température un poil plus haut
             LW_CN = epsilon_atm*sigma*T**4
 
-            axs[1].scatter(flux_atm[:,i],topo_params[:,0]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
+            axs[1].scatter(flux_atm[:,i],emissivities[atm]*topo_params[:,0]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
                                  c = topo_params[:,-1],cmap = dict_atm[atm][2], label = "$SVF_{D&F}$",\
                           edgecolors='black', linewidths=1)
             axs[1].scatter(flux_atm[:,i],taux_atm[:,i]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
@@ -2553,7 +3065,7 @@ def correlation_htrdr_model(
     
     # Colorbar indépendante du plot
     
-    print(min(topo_params[:,-1]),max(topo_params[:,-1]))
+
     vmin = round(min(topo_params[:,-1])/10)*10
     vmax = round(max(topo_params[:,-1])/10)*10
     cmap = cm.binary   
@@ -2569,15 +3081,16 @@ def correlation_htrdr_model(
     
     if force_save == True :
 
-        plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_00/{save_name}.jpg")
+        plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/{save_name}.jpg")
         
+"""      
 ds_ecrins = xr.open_dataset("/home/barroisl/Transect_MC_auto/topographie/lavey_topo_params_30_00.nc")
 ds_ecrins['ts'] = (['y','x'], altit_T(dem = ds_ecrins['zs'].values, 
                                         T0 = 273.15,
                                         z0 = 1300, 
                                         lapse_rate = -6.5e-3))
 
-"""
+
 correlation_htrdr_model(
         exp = "lavey",
         res = "30",
