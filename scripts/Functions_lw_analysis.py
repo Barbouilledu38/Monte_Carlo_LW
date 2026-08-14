@@ -32,7 +32,7 @@ from matplotlib.patches import FancyArrowPatch
 from ipywidgets import FloatSlider, interact
 from matplotlib.widgets import Button, Slider
 from ipywidgets import interact
-
+from sklearn import linear_model
 ############################## Class ###########################
 
 ################## Coordinates stuff ##################################
@@ -178,7 +178,7 @@ def interpolate(
      
     return bilinear_interpolation(xs, ys, svf, pts)
 
-################### Class mc_set #####################################
+################### Class plotting_basic_statsmc_set #####################################
 
 @nb.njit()
 def get_collisions(index, collision):
@@ -256,9 +256,9 @@ class MC_Set:
         self.Nbre_reflexion = np.sum(data_path[:,2])
         self.Nbre_moyen_reflexion_exc = self.Nbre_reflexion/data_path[data_path[:,2] != 0].shape[0]
         self.Nbre_surf = data_path[(data_path[:,1] == 0.) & (data_path[:,2] == 0.)].shape[0]
-        self.Nbre_atm = data_path[(data_path[:,1] == 1)  & (data_path[:,2] == 0)].shape[0]
-        self.Nbre_reflect_surf = data_path[(data_path[:,1] == 0) & (data_path[:,2] != 0)].shape[0]
-        self.Nbre_reflect_atm = data_path[(data_path[:,1] == 1)  & (data_path[:,2] != 0)].shape[0]            
+        self.Nbre_atm = data_path[(data_path[:,1] == 1.)  & (data_path[:,2] == 0.)].shape[0]
+        self.Nbre_reflect_surf = data_path[(data_path[:,1] == 0.) & (data_path[:,2] != 0.)].shape[0]
+        self.Nbre_reflect_atm = data_path[(data_path[:,1] == 1.)  & (data_path[:,2] != 0.)].shape[0]            
         self.Nbre_space = data_path[data_path[:,1] == 2].shape[0]     
         
         # Poids par catégorie
@@ -585,7 +585,31 @@ class MC_Set:
             type_abs = "atmosphère"
         ax.set_ylabel(f'P(l > x | atm : - ; surf : -- )')
         ax.set_xlabel('3D distance of absorption (m)')
+        
+    def number_dist_profile_wlen(self, ax, Distances, wlen_1, wlen_2, color, name, linestyle):
+                  
+        pathes_sky = [self.paths[i] for i in range(len(self.paths)) if\
+                  self.paths[i].wlen > 1000*wlen_1 and self.paths[i].wlen < 1000*wlen_2 and self.paths[i].Abs_surf == False]
+        
+        Dist = [path.full_dist for path in pathes_sky]
+        
+        return np.array([sum([1 for d in Dist if d > threshold]) for threshold in Distances])
+        
+    def number_dist_profile_wlen_z(self, wlen_1, wlen_2, z1, z2):
+                  
+        pathes_sky = [self.paths[i] for i in range(len(self.paths)) if\
+                  self.paths[i].wlen > 1e9*wlen_1 and self.paths[i].wlen < 1e9*wlen_2\
+                  and self.paths[i].Pos_abs[2] >= z1 and self.paths[i].Pos_abs[2] < z2]#
+        
+        return len(pathes_sky)
+        
+    def number_per_interv_spectral(self,wlen_1,wlen_2):
     
+        pathes_interv = [self.paths[i] for i in range(len(self.paths)) if\
+                  self.paths[i].wlen > 1e9*wlen_1 and self.paths[i].wlen < 1e9*wlen_2]# and self.paths[i].Abs_surf == False]  
+                  
+        return len(pathes_interv) 
+        
     def density_dist_profile(self, ax, color, name):
         
         pathes = [self.paths[i] for i in range(len(self.paths)) if\
@@ -1143,7 +1167,7 @@ class MC_Set:
         
     def tab_lambda_z_flux(self,z,LW_int_edges):
     
-        res = np.zeros((z.size-1,LW_int_edges.shape[0]-1)) # on prend en compte aussi les rayon arrivant en dessous de la caméra
+        res = np.zeros((z.size-1,LW_int_edges.shape[0])) # on prend en compte aussi les rayon arrivant en dessous de la caméra
         dz = z[1]-z[0]
     
         pathes = [self.paths[i] for i in range(len(self.paths)) if \
@@ -1238,7 +1262,36 @@ def plotting_flux_profile_all_cams(
 
     plt.show()
     
+def energy_integrated_spectraly_atm_column(z : np.ndarray,
+                                      dossier :str,
+                                     force_save : bool = False,
+                                     save_name : str =' '):
+    
+    dz = z[1] - z[0]
+    n_bins = z.size - 1
+    
+    dtype = np.dtype([
+        ("SMLSATM",     np.float64),
+        ("SMLWATM",     np.float64),
+        ("TUXUATM",     np.float64)
+    ])
+    
+    atms = ["SMLSATM","SMLWATM","TUXUATM"]
+    
+    res = np.zeros(n_bins, dtype=dtype)
 
+    for j, atm in enumerate(atms):
+
+        dat = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/z_profile_atms/{atm}/{dossier}/merge_50_15_15.txt")
+        cam = np.array([0,0,float(dossier)])
+        mc_set = MC_Set(dat, cam)
+
+        prop_atm = Prop_atm(atm)
+        tab = mc_set.tab_lambda_z_flux(z=z, LW_int_edges=prop_atm.LW_int_edges)
+    
+        res[atm] = np.sum(tab, axis = 1)
+        
+    return res
 
 def plotting_spectral_energy_exchange(z : np.ndarray,
                                       dossier :str,
@@ -1259,7 +1312,7 @@ def plotting_spectral_energy_exchange(z : np.ndarray,
             cam = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_camera_tgt.txt")
             mc_set = MC_Set(dat, cam[:3])
             
-            axs[j].hlines(cam[2]/dz,0,15,linestyle = "dashed", color = 'dodgerblue')
+            axs[j].hlines(cam[2]/dz,0,16,linestyle = "dashed", color = 'dodgerblue')
 
             prop_atm = Prop_atm(atm)
             tab = mc_set.tab_lambda_z_flux(z=z, LW_int_edges=prop_atm.LW_int_edges)
@@ -1322,7 +1375,7 @@ def plot_lambda_filter(
             
             if atm == "EMPTATM" : 
                 lambdas = np.array(mc_set.distrib_lambda(False))*1e-3
-                axs[0].hist(lambdas, bins = bins, histtype = 'step', color = 'k', \
+                axs[0].hist(lambdas, bins = bins, histtype = 'bar', color = 'k', \
                             density = True, label = 'Initial spectrum')
             
             lambdas_surf = np.array(mc_set.distrib_lambda(True))*1e-3
@@ -1472,10 +1525,10 @@ dict_atm = {"SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds, ],
             "TUXUATM" : ["Uniforme", "yellow","YlGn", cm.YlGn]}
 """
 
-dict_atm = {"EMPTATM" : ["Transparent", "black","Greys",cm.Greys],
-            "SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds],
-            "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens],
-            "TUXUATM" : ["Uniforme", "blue","Blues", cm.Blues]}
+dict_atm = {"EMPTATM" : ["Transparent", "black","Greys",cm.Greys, "lightslategrey"],
+	    "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens, "palegreen"],
+            "SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds, "lightcoral"],
+            "TUXUATM" : ["Uniforme", "blue","Blues", cm.Blues, "skyblue"]}
 
 atms = list(dict_atm.keys())
 
@@ -1843,8 +1896,6 @@ class Prop_atm:
         lams = 10000 / ((bands[:,0] + b[:,1]) / 2)
     """
         
-        
-
     def plot_ka_profile(self,force_save : bool = False, save_name : str = ' '):
 
         alt_km = self.profiles(variable = "z")*1e-3
@@ -1854,7 +1905,11 @@ class Prop_atm:
         fig, ax = plt.subplots(figsize=(10, 6), layout = 'constrained')
 
         n_z,nb = arr_nb_z.shape
-
+        
+        arr_2 = np.zeros((n_z,nb))
+        arr_2[:,:-1] = arr_nb_z[:,:1]
+        arr_2[:,-1] = arr_nb_z[:,0]
+        
         colors = cm.rainbow(np.linspace(0, 1, nb))
 
         for i, col in enumerate(colors):
@@ -1946,30 +2001,34 @@ def from_position_to_luminence_symbolique(
 def plot_lambda_filter(
     Planck : bool,
         force_save : bool,
-        save_name : str):
+        save_name : str,
+        fact : float):
     
     path_dir = "/home/barroisl/Transect_MC_auto/Data/guiers_250_144_atms/"
     
-    fig, axs = plt.subplots(nrows = 2, ncols = 1, figsize = (12,6), layout = 'constrained')
+    fig, ax = plt.subplots(figsize = (12,4), layout = 'constrained')
+
     
     for i,atm in enumerate(atms):
         
         bins = np.linspace(4,60,240)
         
         if atm != "TUXUATM" : #and atm != "EMPTATM":
+        
+            if atm == 'SMLSATM':
+                color = 'tomato'
+            elif atm == 'SMLWATM' :
+                color = 'forestgreen'
+            else : 
+                color = 'black'
             
             data = np.loadtxt(path_dir + atm +'/11/11_50_15_15.txt')
             pos_camera = np.loadtxt(path_dir + atm +'/11/11_camera_tgt.txt')[:3]
             mc_set = MC_Set(data, pos_camera)
             
-            if atm == "EMPTATM" : 
-                lambdas = np.array(mc_set.distrib_lambda(False))*1e-3
-                axs[0].hist(lambdas, bins = bins, histtype = 'step', color = 'k', \
-                            density = True, label = 'Initial spectrum')
-            
             lambdas_surf = np.array(mc_set.distrib_lambda(True))*1e-3
-            axs[1].hist(lambdas_surf, bins = bins, histtype = 'step',linestyle = 'solid', \
-                    color = dict_atm[atm][1],label = dict_atm[atm][0], density = False)
+            ax.hist(lambdas_surf, bins = bins, histtype = 'bar',linestyle = 'solid', \
+                    color = color,label = dict_atm[atm][0], density = False)
     
     ### Planck
     if Planck :
@@ -1979,14 +2038,14 @@ def plot_lambda_filter(
         Planck = Planck_law(
             wavelength = wavelength, 
             temperature = T)
-        axs[0].plot(wavelength*1e6,0.065*Planck/max(Planck),color = 'firebrick', label = "Planck distribution")
+        ax.plot(wavelength*1e6,fact*Planck/np.max(Planck),color = 'firebrick', label = "Planck distribution")
     
-    for ax in axs :
-        ax.set_yticks([])
-        ax.set_ylabel('Density')
-        ax.set_xlabel('$\lambda$ $\mu m$')
-        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
-        ax.legend()
+
+    #ax.set_yticks([])
+    ax.set_ylabel('Count')
+    ax.set_xlabel('$\lambda$ $[\mu m]$')
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.legend()
         
     if force_save :
     
@@ -2035,6 +2094,61 @@ def plot_atm_density_abs_guiers(
 plot_atm_density_abs_guiers(force_save = True,
                     save_name = "dist_abs_profile_guiers_11")
 """
+
+def plot_atm_density_abs_wlen_guiers_2(
+        force_save : bool,
+        save_name : str,
+        surf : bool,
+        atm : bool):
+    
+    path_dir = "/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/"
+    
+    cmap = cm.autumn_r
+    
+    fig, ax = plt.subplots(nrows = 1, ncols = 1, figsize = (12,6), layout = 'constrained')
+    
+    atm = 'SMLSATM'
+        
+    atm_set = Prop_atm(atm)
+
+    #mask = (atm_set.LW_int_edges[:, 0] > 3000) & (atm_set.LW_int_edges[:, 1] < 45000)        
+    LW_ints = atm_set.LW_int_edges#[mask]
+    
+    Distances = np.arange(0.1,1e5,50)
+    Nbres = np.zeros((len(LW_ints),len(Distances)))
+
+    for i,LW_int in enumerate(LW_ints):
+
+        wlen_1 = 10000/LW_int[1]
+        wlen_2 = 10000/LW_int[0]
+
+        data = np.loadtxt("/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/SMLSATM/11/11_50_15_15.txt")
+        pos_camera = np.loadtxt("/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/SMLSATM/11/11_camera_tgt.txt")[:3]
+        mc_set = MC_Set(data, pos_camera)
+        
+        Add = mc_set.number_dist_profile_wlen(ax = ax,Distances = Distances, wlen_1 = wlen_1, wlen_2 = wlen_2,\
+                                            color = cmap((wlen_1-min(10000/LW_ints[:,1]))/(max(10000/LW_ints[:,1])-min(1000/LW_ints[:,1]))),\
+                                            name = f"[{round(wlen_1,2)};{round(wlen_2,2)}] $\mu m$",\
+                                            linestyle = 'solid')
+        
+        for j in range(i,len(LW_ints)):
+            Nbres[j,:] += Add
+                        
+    for j in range(len(LW_ints[:,0])):
+        ax.fill_between(Distances,np.zeros(len(Distances)),Nbres[15-j],
+                       color = cmap((10000/LW_ints[15-j:,1]-min(10000/LW_ints[:,1]))/(max(10000/LW_ints[:,1])-min(1000/LW_ints[:,1]))),
+                       label = f"[{round(10000/LW_ints[15-j,1],2)};{round(10000/LW_ints[15-j,0],2)}] $\mu m$")
+        
+    ax.set_xscale('log')
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.set_ylabel('Number of path atm & space of length > x')
+    ax.set_xlabel('3D distance (m)')
+    ax.legend()
+    
+    if force_save :
+    
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/fake_topo/{save_name}.jpg")
+        
 
 def plot_atm_density_abs_wlen_guiers(
         force_save : bool,
@@ -2745,7 +2859,64 @@ plt.savefig(dire + "Output/symbolique_hist.jpg")
 
 ############################ Basic stats ###############################
 
-def  plotting_basic_stats(        
+def plotting_basic_stats_2(        
+        exp : str,
+        res : str,
+        n_cam : str,
+        lapse_rate : bool,
+        save_name : str,
+        atm : str,
+        force_save = False):
+    
+    if exp == "lavey":
+        if lapse_rate :
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_surf_tapadito.npy")
+            taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_atm_tapadito.npy")
+            
+        else :
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf_tapadito.npy")
+            taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm_tapadito.npy")          
+    else :
+    
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf_tapadito.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm_tapadito.npy")
+    
+    n_cam = taux_atm[atm].size
+    if atm == "SMLSATM":
+        index_atm = 1
+    elif atm == "SMLWATM":
+        index_atm = 2 
+    elif atm == "TUXUATM" :
+        index_atm = 3
+
+    index_EMPTATM = 0
+    
+    fig,ax = plt.subplots(figsize = (12,4), layout = 'constrained')
+    
+    ax.fill_between(x = np.arange(n_cam),y1 = 100*taux_surf[atm],\
+                    y2 = 100*np.ones(n_cam), color = 'skyblue', label = 'Atmosphere')
+    ax.fill_between(x = np.arange(n_cam),y1=np.zeros(n_cam),\
+                    y2 = 100*taux_surf["EMPTATM"], color = 'lightcoral', label = 'Surface')
+    ax.fill_between(x = np.arange(n_cam), y1 = 100*taux_surf[atm], y2 = 100*taux_surf["EMPTATM"],\
+     facecolor='none', edgecolor='deepskyblue', hatch='//', linewidth=2, label = 'Occulting atmosphere')
+    
+    ax.set_xlabel("Index caméra")
+    ax.set_ylabel("Origine des chemins (%)")
+    ax.legend()
+    
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    
+    ax.set_title(f'{exp} : res = {res}m, n_cam = {n_cam}, atm = {dict_atm[atm][0]}', fontsize = 15)
+    
+    if force_save :
+        if exp == "lavey" and lapse_rate :
+            plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/{save_name}.png")
+        elif exp == 'lavey' and not lapse_rate :
+            plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/{save_name}.png")
+        elif exp != "lavey" :
+            plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/{save_name}.png")
+
+def plotting_basic_stats(        
         exp : str,
         res : str,
         n_cam : str,
@@ -2760,8 +2931,8 @@ def  plotting_basic_stats(
             taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_atm.npy")
             
         else :
-            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf.npy")
-            taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm.npy")          
+            taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf_tapadito.npy")
+            taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm_tapadito.npy")          
     else :
     
         taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
@@ -2866,6 +3037,150 @@ plotting_basic_stats(
     
 ############################################### SVF and Atm fluxes ################################
 
+def plotting_atms_SVF_and_flux_with_regression(
+        exp : str,
+        res : str,
+        n_cam : str,
+        save_name : str,
+        lapse_rate : bool,
+        force_save = False):
+    
+    if exp == "lavey" and lapse_rate :
+    
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/flux_atm.npy")
+
+    elif exp == "lavey" and not lapse_rate :
+        
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/flux_atm.npy")
+        
+    elif exp != "lavey" :
+   
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_atm.npy")  
+        
+    topo_params = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/topo_polygon_{exp}_{res}_{n_cam}.txt")
+    
+    fig,ax = plt.subplots(figsize = (7,7), layout = 'constrained')
+    
+    for i,atm in enumerate(atms):
+        
+        if atm != "TUXUATM":
+        
+            X = topo_params[:,0].reshape(-1, 1)
+            Y = (1-taux_surf[:,i])
+            lm = linear_model.LinearRegression()
+            lm.fit(X, Y)  # fitting the model
+            r2 = lm.score(X, Y)
+            x = [min(topo_params[:,0]),max(topo_params[:,0])]
+            ax.plot(x, lm.coef_*x+lm.intercept_, linestyle = 'dashed', color = dict_atm[atm][1])
+
+            ax.scatter(topo_params[:,0],(1-taux_surf[:,i]), marker = '*', s = 70, c = dict_atm[atm][1],\
+                   label = dict_atm[atm][0] + f' ; $R^2 ={round(r2,3)}$ ', alpha = 0.7) #topo_params[:,-1]
+
+    ax.plot([min(topo_params[:,0]),max(topo_params[:,0])],[min(topo_params[:,0]),max(topo_params[:,0])],\
+                linestyle ='dotted', color = 'k',label = 'y=x')
+
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.set_xlabel('$SVF_{géometrique}$')
+    ax.set_ylabel('1-Nbre surface/Nbre total')
+    ax.set_aspect('equal')
+    ax.set_xlim((0.5,1))
+
+    ax.legend()
+
+    dire = "/home/barroisl/Transect_MC_auto/"
+    
+    if force_save == True :
+    
+        if exp == 'lavey' and lapse_rate :
+
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_65_emis/{save_name}.jpg")
+           
+        elif exp == 'lavey' and not lapse_rate :
+        
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_00_emis/{save_name}.jpg")
+            
+        elif exp != "lavey" :
+        
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms/{save_name}.jpg")
+
+def plotting_atms_SVF_and_flux_2(
+        exp : str,
+        res : str,
+        n_cam : str,
+        save_name : str,
+        lapse_rate : bool,
+        force_save = False):
+    
+    if exp == "lavey" and lapse_rate :
+    
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_65_emis/flux_atm.npy")
+
+    elif exp == "lavey" and not lapse_rate :
+        
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_00_emis/flux_atm.npy")
+        
+    elif exp != "lavey" :
+   
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_atm.npy")  
+        
+    topo_params = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/topo_polygon_{exp}_{res}_{n_cam}.txt")
+    
+    fig,ax = plt.subplots(figsize = (12,6), layout = 'constrained')
+    
+    for i,atm in enumerate(atms):
+        
+        if atm == "TUXUATM":
+            fact = 0.5
+        else :
+            fact = 1
+
+        ax.scatter(topo_params[:,0],(1-taux_surf[:,i]), marker = '*', s = 70, c = dict_atm[atm][1],\
+                       label = dict_atm[atm][0], alpha = 0.7) #topo_params[:,-1]
+        ax.plot([min(topo_params[:,0]),max(topo_params[:,0])],[min(topo_params[:,0]),max(topo_params[:,0])],linestyle ='dashed', color = 'k')
+
+
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.set_xlabel('$SVF_{géometrique}$')
+    ax.set_ylabel('1-Nbre surface/Nbre total')
+    #ax.set_aspect('equal')
+    #ax.set_xlim((0.77,1))
+
+    ax.legend()
+
+    dire = "/home/barroisl/Transect_MC_auto/"
+    
+    if force_save == True :
+    
+        if exp == 'lavey' and lapse_rate :
+
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_65_emis/{save_name}.jpg")
+           
+        elif exp == 'lavey' and not lapse_rate :
+        
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_00_emis/{save_name}.jpg")
+            
+        elif exp != "lavey" :
+        
+            plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms/{save_name}.jpg")
+
 
 def plotting_atms_SVF_and_flux(
         exp : str,
@@ -2898,18 +3213,8 @@ def plotting_atms_SVF_and_flux(
         
     topo_params = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/topo_polygon_{exp}_{res}_{n_cam}.txt")
     
-    
-
     fig,axs = plt.subplots(nrows = 2, ncols = 1, figsize = (12,6), layout = 'constrained')
     
-    dict_atm = {"SMLSATM" : ["Mid latitude summer", "red", "Reds", cm.Reds, ],
-            "SMLWATM" : ["Mid latitude winter", "green", "Greens", cm.Greens],
-            "SPOSATM" : ["Polar summer", "orange","Oranges",cm.Oranges],
-            "SPOWATM" : ["Polar winter", "blue","Blues",cm.Blues],
-            "STROATM" : ["Tropics", "purple","Purples",cm.Purples],
-            "EMPTATM" : ["Transparent", "black","Greys",cm.Greys],
-            "TUXUATM" : ["Uniforme", "yellow","Blues", cm.Blues]}
-    atms = ["SMLSATM", "SMLWATM","SPOSATM","SPOWATM","STROATM","EMPTATM","TUXUATM"]
     for i,atm in enumerate(atms):
         
         if atm == "TUXUATM":
@@ -2976,6 +3281,101 @@ plotting_atms_SVF_and_flux(
         force_save = False)
 """
 
+def plotting_flux_isothermal_layers():
+
+    z = np.arange(0, 6e3, 100)
+
+    listdir = os.listdir("/home/barroisl/Transect_MC_auto/Data/z_profile_atms/SMLSATM/")[::2]
+    Somme_flux = np.zeros(len(listdir))
+
+    cmap = cm.viridis_r
+
+    fig, ax = plt.subplots(figsize = (12,6), layout = 'constrained')
+
+    for i,dossier in tqdm(enumerate(listdir)):
+        res = energy_integrated_spectraly_atm_column(z = z,
+                                         dossier = dossier,
+                                         force_save = False,
+                                         save_name = "profile_LW")
+
+        Somme_flux[i] = np.sum(res["SMLSATM"])
+
+
+        mask_z = z[:-1] < float(dossier)
+        res["SMLSATM"][mask_z] = np.nan
+
+        ax.plot(res["SMLSATM"],z[:-1], color = cmap(int(dossier)/4100), marker = 'o')
+
+    ax.plot(Somme_flux,[int(dossier)for dossier in listdir],color = 'red',\
+            label = 'Total downwelling flux',marker = 'o')
+
+    z_CL = 4000
+    z_arr = np.linspace(0,z_CL,200)
+    prop_atm = Prop_atm("SMLSATM")
+    T_profile = prop_atm.profiles(variable = "T")
+    z_profile = prop_atm.profiles(variable = "z") 
+    flux_d_atm_CN = downscall_atm_flux_2(LW_CL = Somme_flux[-1],
+                   z_arr =z_arr,
+                   z_CL = z_CL,
+                   lapse_rate = -6.5e-3)
+
+    ax.plot(flux_d_atm_CN,z_arr,label = ' Standard lapse rate', color = dict_atm[atm][1],\
+            linestyle = 'dashed')
+
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.set_xlabel('LW flux $[W.m^{-2}]$')
+    ax.set_ylabel('Altitude $[m]$')
+    ax.legend()
+
+    plt.savefig("/home/barroisl/Transect_MC_auto/Output/z_profiles/flux_profile.png")
+    
+def model_simple_atm_LW(
+            exp :str,
+            res : str,
+            n_cam : str,
+            lr : str,
+            force_save : bool = False,
+            save_name : str = ' '):
+    
+    fig, ax = plt.subplots(figsize = (6,6),layout='constrained')
+    
+    topo_params = np.loadtxt("/home/barroisl/Transect_MC_auto/camera_tgt/topo_polygon_lavey_30_100.txt")
+    atm = "SMLSATM"
+    dire = f"/home/barroisl/Transect_MC_auto/Data/{exp}_{res}_{n_cam}_atms_{lr}_emis/{atm}/"
+    list_ = os.listdir(dire)
+    flux_d = np.load("/home/barroisl/Transect_MC_auto/Data/z_profile_atms/flux_d.npy")
+    Flux_model = np.zeros(len(list_))
+    Flux_model_2 = np.zeros(len(list_))
+    
+    taux_surf = np.load("/home/barroisl/Transect_MC_auto/Output/lavey_30_100_atms_00_emis/taux_surf.npy", allow_pickle = True)
+    flux_atm = np.load("/home/barroisl/Transect_MC_auto/Output/lavey_30_100_atms_00_emis/flux_atm.npy", allow_pickle = True)
+    
+    for d in range(taux_atm.shape[0]):
+        #dat = np.loadtxt(dire +f"/{dossier}/{dossier}_50_15_15.txt")
+        #cam = np.loadtxt(dire +f"/{dossier}/{dossier}_camera_tgt.txt")
+        
+        #print(cam[2],topo_params[d,-1])
+
+        #mc_set = MC_Set(dat,cam[:3])
+        #Flux_htrdr[d] = mc_set.W_atm*mc_set.W_tot/mc_set.Nbre_photon        
+        Flux_model[d] = topo_params[d,0]*np.interp(topo_params[d,-1], flux_d["z"][1:], flux_d[atm][1:])
+        Flux_model_2[d] = (1-taux_surf[d,1])*np.interp(topo_params[d,-1], flux_d["z"][1:], flux_d[atm][1:])
+        
+    ax.scatter(flux_atm[:,1],Flux_model,color = 'green', label = '$SVF_{geom}*F_{plaine}(z_{cam})$')
+    ax.scatter(flux_atm[:,1],Flux_model_2,color = 'red', label = '$SVF_{htrdr}*F_{plaine}(z_{cam})$')
+    
+    ax.plot([100,240],[100,240], color = 'k', linestyle = 'dashed')
+    
+    ax.set_aspect('equal')
+    
+    ax.set_xlabel('Flux LW htrdr $[W.m^{-2}]$')
+    ax.set_ylabel('Flux model $[W.m^{-2}]$')
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.legend()
+    
+    if force_save :
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{save_name}.png")
+
 ########################################### Modelisation simple ##################################
 
 def correlation_htrdr_model(
@@ -2987,6 +3387,7 @@ def correlation_htrdr_model(
         ds_chartreuse : xr.Dataset,
         lapse_rate : bool,
         atm_ : str,
+
         force_save = False,
         epsilon_surf = 0.98,
         epsilon_atm = 0.98,
@@ -2998,10 +3399,10 @@ def correlation_htrdr_model(
         else :
             grad = '00'
     
-        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_surf.npy")
-        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_surf.npy")
-        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_atm.npy")
-        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_atm.npy")
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_surf_tapadito.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_surf_tapadito.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_atm_tapadito.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_atm_tapadito.npy")
 
     else :
         flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_surf.npy")
@@ -3034,7 +3435,7 @@ def correlation_htrdr_model(
             axs[1].scatter(flux_atm[:,i],emissivities[atm]*topo_params[:,0]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
                                  c = topo_params[:,-1],cmap = dict_atm[atm][2], label = "$SVF_{D&F}$",\
                           edgecolors='black', linewidths=1)
-            axs[1].scatter(flux_atm[:,i],taux_atm[:,i]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
+            axs[1].scatter(flux_atm[:,i],emissivities[atm]*taux_atm[:,i]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
                                  c = topo_params[:,-1],cmap = dict_atm[atm][2], label = "$SVF_{htrdr}$")
             axs[1].plot([min(flux_atm[:,i]),max(flux_atm[:,i])],[min(flux_atm[:,i]),max(flux_atm[:,i])], color = 'k', linestyle = 'dashed')
             
@@ -3090,28 +3491,175 @@ def correlation_htrdr_model(
 
         plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/{save_name}.jpg")
         
-"""      
-ds_ecrins = xr.open_dataset("/home/barroisl/Transect_MC_auto/topographie/lavey_topo_params_30_00.nc")
-ds_ecrins['ts'] = (['y','x'], altit_T(dem = ds_ecrins['zs'].values, 
-                                        T0 = 273.15,
-                                        z0 = 1300, 
-                                        lapse_rate = -6.5e-3))
-
-
-correlation_htrdr_model(
-        exp = "lavey",
-        res = "30",
-        n_cam = "100",
-        save_name = "htrdr_vs_model_fluxes_lavey_SMLWATM",
-        alpha = 0.5,
-        epsilon_atm = 0.89,
+ 
+        
+def correlation_htrdr_model_2(
+        exp : str,
+        res : str,
+        n_cam : str,
+        save_name : str,
+        alpha : float,
+        ds_chartreuse : xr.Dataset,
+        lapse_rate : bool,
+        atm_ : str,
+        force_save = False,
         epsilon_surf = 0.98,
-        atm_ = ["SMLWATM","SMLSATM","TUXUATM","EMPTATM"],
-        ds_chartreuse = ds_ecrins,
-        lapse_rate = True,
-        force_save = False)
-"""
-
-
+        epsilon_atm = 0.98,
+        sigma = 5.67e-8):
     
+    if exp == 'lavey' :
+        if lapse_rate == True :
+            grad = '65'
+        else :
+            grad = '00'
+    
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_surf_tapadito.npy", allow_pickle = True)
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_surf_tapadito.npy", allow_pickle = True)
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/taux_atm_tapadito.npy", allow_pickle = True)
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/flux_atm_tapadito.npy", allow_pickle = True)
+
+    else :
+        flux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_surf.npy")
+        taux_surf = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_surf.npy")
+        taux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/taux_atm.npy")
+        flux_atm = np.load(f"/home/barroisl/Transect_MC_auto/Output/{exp}_{res}_{n_cam}_atms/flux_atm.npy")
+        
+    topo_params = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/topo_polygon_{exp}_{res}_{n_cam}.txt")
+    cam_tgt = np.loadtxt(f"/home/barroisl/Transect_MC_auto/camera_tgt/polygon_{exp}_{res}_{n_cam}.txt")
+
+    fig,axs = plt.subplots(nrows = 3, ncols = 1, figsize = (16,9), layout = 'constrained')
+    
+    emissivities = {"EMPTATM" : 0,
+                    "TUXUATM" : 0.98,
+                    "SMLSATM" : 0.62,
+                    "SMLWATM" : 0.62}
+                    
+    emissivities_low_atm = {"EMPTATM" : 0,
+                    "TUXUATM" : 1,
+                    "SMLSATM" : 1,
+                    "SMLWATM" : 1}
+
+    for i,atm in enumerate(atms):
+        
+        if atm in atm_ :
+            
+            ########## Atm flux #############
+        
+            prop_atm = Prop_atm(atm)
+            T_profile = prop_atm.profiles(variable = "T")
+            z_profile = prop_atm.profiles(variable = "z")     
+            T = np.interp(topo_params[:,-1], z_profile, T_profile) #-6.5 # pour prendre la température un poil plus haut
+            LW_CN = epsilon_atm*sigma*T**4
+
+            axs[1].scatter(flux_atm[atm],emissivities[atm]*topo_params[:,0]*LW_CN, marker = 'o', s = 50, alpha = alpha,\
+                                 color = dict_atm[atm][1], label = dict_atm[atm][0] + "D&F",\
+                          edgecolors='black', linewidths=1)
+            axs[1].scatter(flux_atm[atm],emissivities[atm]*topo_params[:,0]*LW_CN + emissivities_low_atm[atm]*(taux_atm[atm]-topo_params[:,0])*LW_CN, marker = 'o', s = 50, alpha = alpha,\
+                                 color = dict_atm[atm][4], label = dict_atm[atm][0] + "htrdr")            
+            ########## Surf flux #############
+            
+            LW_CN_self = epsilon_surf*sigma*interpolate(
+                ds = ds_chartreuse,
+                points = cam_tgt[:,:2],
+                var_name = "ts")**4
+            
+            
+            axs[0].scatter(flux_surf[atm],(1-topo_params[:,0])*LW_CN_self, marker = 'o', s = 50, alpha = alpha,\
+                                 color = dict_atm[atm][1], label = dict_atm[atm][0],\
+                          edgecolors='black', linewidths=1)  
+            axs[0].scatter(flux_surf[atm],taux_surf[atm]*LW_CN_self, marker = 'o', s = 50, alpha = alpha,\
+                                 color = dict_atm[atm][4]) 
+            
+            ########## Total flux #############
+            
+            axs[2].scatter(flux_surf[atm]+flux_atm[atm],(1-topo_params[:,0])*LW_CN_self+emissivities[atm]*topo_params[:,0]*LW_CN, \
+                           marker = 'o', s = 50, alpha = alpha,\
+                                 color = dict_atm[atm][1], label = "$SVF_{D&F}$",\
+                          edgecolors='black', linewidths=1)  
+            axs[2].scatter(flux_surf[atm]+flux_atm[atm],taux_surf[atm]*LW_CN_self+emissivities[atm]*topo_params[:,0]*LW_CN + emissivities_low_atm[atm]*(taux_atm[atm]-topo_params[:,0])*LW_CN, marker = 'o', s = 50, \
+                                 color = dict_atm[atm][4], alpha = alpha,label = "$SVF_{htrdr}$")
+            
+        axs[0].plot([0,180],[0,180],color = 'k', linestyle = 'dashed')
+        axs[0].legend()
+        axs[1].plot([0,320],[0,320], color = 'k', linestyle = 'dashed')
+        axs[2].plot([0,320],[0,320],color = 'k', linestyle = 'dashed')
+    
+    for ax in axs :
+        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.set_ylabel('$LW_{s}$ ($W.m^{-2}$)')
+        #ax.legend()
+        #ax.set_aspect('equal')
+        ax.set_xlim((0,310))
+        #ax.set_ylim((0,1600))
+        
+    axs[0].set_xlabel('$LW_{htrdr,surf}$ ($W.m^{-2}$)')
+    #axs[0].set_ylabel('$LW_{model,surf}$ ($W.m^{-2}$)')
+    axs[0].set_ylabel('$S_{urface}VF_{htrdr/D&F}$ $\epsilon \sigma T_{cam}^{4}$', fontsize = 15)
+    
+    axs[1].set_xlabel('$LW_{htrdr,atm}$ ($W.m^{-2}$)')
+    #axs[1].set_ylabel('$LW_{model,atm}$ ($W.m^{-2}$)')
+    axs[1].set_ylabel('$SA_{tm}VF_{htrdr/D&F}$ $\epsilon \sigma T_{2m}^{4}$', fontsize = 15)
+    
+    axs[2].set_xlabel('$LW_{htrdr}$ ($W.m^{-2}$)')
+    #axs[2].set_('$LW_{model,surf}$ ($W.m^{-2}$)')
+    axs[2].set_ylabel('Total LW ($W.m^{-2}$)', fontsize = 15)
+
+    dire = "/home/barroisl/Transect_MC_auto/"
+    
+    if force_save == True :
+
+        plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/{save_name}.jpg")
+
+########################################### Topo params canyonne ##################################
+
+import scipy.integrate as integrate
+import scipy.special as special
+
+@nb.njit(cache=True)
+def theta_canyonne(phi, theta_perp):
+    """
+    Attention tout en radiant
+    """
+    return np.tan(theta_perp)/np.sqrt(1+1/(np.tan(phi)**2))
+
+@nb.njit(cache = True)
+def function_to_integrate(theta_perp, phi):
+    
+    return (1/(2*np.pi))*np.sin(np.pi/2-np.arctan(theta_canyonne(phi = phi, theta_perp =theta_perp)))**2
+
+def SVF_cannyonne(theta_perp):
+    return integrate.quad(lambda x: function_to_integrate(theta_perp = theta_perp,phi = x), 0, 2*np.pi)[0]
+    
+@nb.njit(cache=True)
+def b_function_of_a(a,theta_perp):
+    
+    return a*np.tan(theta_perp) 
+    
+@nb.njit(cache=True)
+def S_haute(R: float,
+           theta1 : float | np.ndarray)-> float | np.ndarray :
+    
+    return 2*R**2*theta1-R**2*np.sin(2*theta1)
+
+@nb.njit(cache=True)
+def S_haute_2(u):
+    
+    return 2*(np.arcsin(1)-(u)*np.sqrt(1-(u)**2)-np.arcsin(u))
+    
+@nb.njit(cache=True)
+def ctf_cannyone(z0 : float, b : float | np.ndarray, R : float, a : float | np.ndarray)->float | np.ndarray:
+    
+    u = a/R
+    
+    return z0-((z0+b)*(R**2)*S_haute_2(u) + z0*(np.pi*R**2-(R**2)*S_haute_2(u)))/(np.pi*R**2)
+
+#@nb.njit(cache=True)
+def volume_eff_cannyone(z0 : float, b : float | np.ndarray, R : float, 
+                        a : float | np.ndarray)->float | np.ndarray:
+        
+    mask_a = (a[:] > R)
+    a[mask_a] = R
+    
+    return (1/2)*np.pi*R**2*np.tan(np.arccos(0.5))*a
+
         
