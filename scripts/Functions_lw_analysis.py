@@ -41,7 +41,7 @@ def convert_epsg_pts(xs,ys, epsg_src=4326, epsg_tgt=32632):
     """
     Simple function to convert a list fo poitn from one projection to another oen using PyProj
 
-    Args:
+    Args:def correlation_htrdr_model_2
         xs (array): 1D array with X-coordinate expressed in the source EPSG
         ys (array): 1D array with Y-coordinate expressed in the source EPSG
         epsg_src (int): source projection EPSG code
@@ -609,6 +609,13 @@ class MC_Set:
                   self.paths[i].wlen > 1e9*wlen_1 and self.paths[i].wlen < 1e9*wlen_2]# and self.paths[i].Abs_surf == False]  
                   
         return len(pathes_interv) 
+     
+    def number_per_interv_spectral_surf(self,wlen_1,wlen_2):
+    
+        pathes_interv = [self.paths[i] for i in range(len(self.paths)) if\
+                  self.paths[i].wlen > 1e9*wlen_1 and self.paths[i].wlen < 1e9*wlen_2 and self.paths[i].Abs_surf == True]  
+                  
+        return len(pathes_interv)
         
     def density_dist_profile(self, ax, color, name):
         
@@ -1354,6 +1361,67 @@ def plotting_spectral_energy_exchange(z : np.ndarray,
 
     plt.show()
     
+def plotting_spectral_energy_exchange_2(z : np.ndarray,
+                                      dossier :str,
+                                     step : int,
+                                     force_save : bool = False,
+                                     save_name : str =' '):
+    
+    dz = z[1] - z[0]
+    n_bins = z.size - 1
+
+    fig, ax = plt.subplots(figsize=(8, 6), layout='constrained')
+
+    im = None  # will hold the last mappable for the shared colorbar
+    
+    atm = "SMLWATM"
+    
+    dat = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_50_15_15.txt")
+    cam = np.loadtxt(f"/home/barroisl/Transect_MC_auto/Data/lavey_30_100_atms_00_emis/{atm}/{dossier}/{dossier}_camera_tgt.txt")
+    mc_set = MC_Set(dat, cam[:3])
+
+    ax.hlines(cam[2]/dz,0,16,linestyle = "dashed", color = 'dodgerblue', label = 'Altitude camera')
+
+    prop_atm = Prop_atm(atm)
+    tab = mc_set.tab_lambda_z_flux(z=z, LW_int_edges=prop_atm.LW_int_edges)
+
+    im = ax.pcolormesh(
+        tab,
+        norm=LogNorm(vmin=1e-3, vmax=1e1),
+        cmap='binary',
+        shading='auto')
+
+    # --- Y ticks every 500 m ---
+    step_bins = int(step / dz)  # number of bins per 500 m
+    ytick_positions = np.arange(0, n_bins + 1, step_bins)
+    ytick_labels = [f"{int(z[i])}" for i in ytick_positions]
+
+    ax.set_yticks(ytick_positions)
+    ax.set_yticklabels(ytick_labels, fontsize=12)
+
+    # --- X ticks: spectral intervals indexed 1 to 16 ---
+    n_spectral = tab.shape[1]
+    xtick_positions = np.arange(n_spectral) + 0.5  # center of each column
+    xtick_labels = [str(k) for k in range(1, n_spectral + 1)]
+
+    ax.set_xticks(xtick_positions)
+    ax.set_xticklabels(xtick_labels, fontsize=12)
+
+    ax.legend()
+    ax.set_title(atm)
+    ax.set_xlabel('$\lambda$ bande')
+    ax.set_ylabel('Altitude $[m]$')
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.grid(True, alpha = 0.3)
+
+    # --- Shared colorbar on the right, for the whole figure ---
+    fig.colorbar(im, ax=ax, location='right', label='Luminence énergétique $[W.m^{-2}]$')
+    
+    if force_save :
+        plt.savefig(f"/home/barroisl/Transect_MC_auto/Output/{save_name}.png")
+
+    plt.show()
+    
 def plot_lambda_filter(
     Planck : bool,
         force_save : bool,
@@ -1395,8 +1463,9 @@ def plot_lambda_filter(
     for ax in axs :
         ax.set_yticks([])
         ax.set_xlabel('$\lambda$ [$\mu m$]')
-        ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+        ax.spines[['right', 'top']].set_visible(False)
         ax.legend()
+        ax.grid(True, alpha = 0.3)
         
     axs[0].set_ylabel('Density')
     axs[1].set_ylabel('Count')
@@ -1540,7 +1609,7 @@ class Prop_atm:
     
     def __init__(self,name):
         
-        directory = "/home/barroisl/edstar/Simus/atms/"
+        directory = "/home/barroisl/edstar/Simus/autres_atms/"
         file_path = directory + "ecrad_opt_prop_"+name+".txt"
         marker_list = ["Number of levels", "Number of layers", "Ground temperature",
                        "Pressure","Temperature", "Altitude", "Nominal x(H2O)",
@@ -2041,10 +2110,11 @@ def plot_lambda_filter(
         ax.plot(wavelength*1e6,fact*Planck/np.max(Planck),color = 'firebrick', label = "Planck distribution")
     
 
-    #ax.set_yticks([])
-    ax.set_ylabel('Count')
-    ax.set_xlabel('$\lambda$ $[\mu m]$')
-    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.tick_params(axis="both", labelsize=20)
+    ax.set_ylabel('Count', fontsize = 25)
+    ax.set_xlabel('$\lambda$ $[\mu m]$', fontsize = 25)
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.grid(True, alpha = 0.3)
     ax.legend()
         
     if force_save :
@@ -2792,7 +2862,6 @@ def plot_MC_symoblique_test(
     cax = ax.scatter(topo_flux[:,dict_map["f_surf"]]*topo_flux[:,dict_map["flux"]]/(15*15*50),\
                      epsilon_surf*topo_flux[:,dict_map["CN"]], c = dict_atm[atm][1], label = dict_atm[atm][0],\
                     alpha = alpha)#c = c, cmap = 'RdBu_r', vmin = -2, vmax = 2, marker = 'o', s = 15)
-    ax.plot([0,200],[0,200],linestyle = 'dashed', color = 'k', linewidth = 1)
 
     """
     cmap = mpl.cm.RdBu_r
@@ -2816,11 +2885,11 @@ def plot_MC_symoblique_test(
         y_fit = model.predict(X_fit)
         ax.plot(X_fit, y_fit, color='red', alpha = 0.5, linestyle = 'dashed') #, label=f"y={round(a[0][0],2)}*x {round(b,2)}")
 
-    ax.set_ylabel('$\epsilon \sigma T^4$ ($W.m^{-2}$)')
+    ax.set_ylabel('$\epsilon \sigma T^4$ ($W.m^{-2}$)', fontsize = 25)
     #ax.set_xlabel('Surface LW radiative flux density htrdr ($W.m^{-2}$)')
     ax.set_xlabel('')
     #ax.set_title('Densité de flux radiatif dû à la surface pour MC vs atm gris')
-    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+    ax.spines[['right', 'top']].set_visible(False)
 
 
 """
@@ -3085,7 +3154,7 @@ def plotting_atms_SVF_and_flux_with_regression(
             ax.scatter(topo_params[:,0],(1-taux_surf[:,i]), marker = '*', s = 70, c = dict_atm[atm][1],\
                    label = dict_atm[atm][0] + f' ; $R^2 ={round(r2,3)}$ ', alpha = 0.7) #topo_params[:,-1]
 
-    ax.plot([min(topo_params[:,0]),max(topo_params[:,0])],[min(topo_params[:,0]),max(topo_params[:,0])],\
+    ax.plot([0.4,1],[0.4,1],\
                 linestyle ='dotted', color = 'k',label = 'y=x')
 
     ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
@@ -3609,6 +3678,8 @@ def correlation_htrdr_model_2(
     if force_save == True :
 
         plt.savefig(dire+f"Output/{exp}_{res}_{n_cam}_atms_{grad}_emis/{save_name}.jpg")
+        
+        
 
 ########################################### Topo params canyonne ##################################
 
@@ -3661,5 +3732,548 @@ def volume_eff_cannyone(z0 : float, b : float | np.ndarray, R : float,
     a[mask_a] = R
     
     return (1/2)*np.pi*R**2*np.tan(np.arccos(0.5))*a
+ 
+def SVFm_cannyonne(a,theta_perp,l):
+    
+    if 3*l < a :
+        return 1
+    else :
+        alpha = np.arccos(a/(3*l))
+        res = (2*np.pi-4*alpha)/(2*np.pi)
+        res += integrate.quad(lambda x: function_to_integrate(theta_perp = theta_perp,phi = x),\
+                              np.pi-alpha, np.pi+alpha)[0]
+        res += integrate.quad(lambda x: function_to_integrate(theta_perp = theta_perp,phi = x),\
+                              2*np.pi-alpha, 2*np.pi)[0]
+        res += integrate.quad(lambda x: function_to_integrate(theta_perp = theta_perp,phi = x),\
+                              0, alpha)[0]
+        
+        return res
+    
+def SVF_somme_m(a,theta_perp,l_moys,weights):
+    SVFm = np.zeros(l_moys.size)
+    weighted_SVFm = np.zeros(l_moys.size)
+    for i,l in enumerate(l_moys) :
+        SVFm[i] = SVFm_cannyonne(a,theta_perp,l)
+        weighted_SVFm[i] = SVFm[i]*weights[i]
+        
+    return SVFm,np.sum(weighted_SVFm)
+    
+    
+################################ SVF défini par Bande de longueur d'onde ##############################
 
+############### Calcul ###########################
+
+from topocalc.skew import adjust_spacing, skew
+from topocalc.gradient import gradient_d8
+
+def nan_a_tab(tab : np.ndarray, max_index : int, fwd : bool):
+    
+    a,b = tab.shape
+    
+    res = tab.copy()
+    
+    if fwd :
+    
+        for j in range(b):
+            for i in range(j,a):
+                if i > j + max_index :
+                    res[i,j]=np.nan
+                    
+    else :
+        
+        for j in range(b):
+            for i in range(j,0,-1):
+                if i < j - max_index :
+                    res[i,j]=np.nan  
+                
+    return res
+
+def pyhorizon_Radius(dem : np.ndarray, dx : float, max_length : float, max_threshold : bool, fwd : bool):
+    """
+    From Topocalc github repo : https://github.com/USDA-ARS-NWRC/topocalc/blob/main/topocalc/horizon.py
+    Modify so that radius of horizon angle investigation is in input
+    
+    Pure python version of the horizon function.
+
+    NOTE: this is fast for small dem's but quite slow
+    for larger ones. This is mainly to show that it
+    can be done with numpy but requires a bit more to
+    remove the for loop over the rows. Also, this just
+    calculates the horizon in one direction, need to implement
+    the rest of the horizon function for calcuating the
+    horizon at an angle.
+
+    Args:
+        dem (np.ndarray): dem for the horizon
+        dx (float): spacing for the dem
+
+    Returns:
+        [tuple]: cosine of the horizon angle and index
+            to the horizon.
+    """
+
+    # needs to be a float
+    if dem.dtype != np.float64:
+        dem = dem.astype(np.float64)
+        
+    # Maximum index 
+    max_index = int(max_length // dx)
+
+    nrows, ncols = dem.shape
+    hcos = np.zeros_like(dem)
+    horizon_index = np.zeros_like(dem)
+
+    # distance to each point
+    # k=-1 because the distance to the point itself is 0
+    distance = dx * np.cumsum(np.tri(ncols, ncols, k=-1), axis=0)
+    col_index = np.arange(0, ncols)
+        
+    for n in range(nrows):
+        if fwd :
+            surface = dem[n, :]
+        else :
+            surface = dem[n, ::-1]
+
+        m = np.repeat(surface.reshape(1, -1), ncols, axis=0)
+        
+        #height change
+        height = np.tril(m.T - m)
+   
+        # slope
+        slope = height / distance
+        
+        # Added line so that the research for maximal slope stop after max_index_columns
+        if max_threshold :
+            slope = nan_a_tab(tab = slope, max_index = max_index, fwd = True)
+            
+        hor = np.nanargmax(slope[:, :-1], axis=0)
+
+        hor = np.append(hor, ncols-1)
+        hidx = hor.astype(int)
+
+        horizon_height_diff = surface[hidx] - surface
+        horizon_distance_diff = dx * (hor - col_index)
+
+        new_horizon = horizon_height_diff / \
+            np.sqrt(horizon_height_diff**2 + horizon_distance_diff**2)
+
+        new_horizon[new_horizon < 0] = 0
+        new_horizon[np.isnan(new_horizon)] = 0
+
+        hcos[n, :] = new_horizon
+        horizon_index[n, :] = hidx
+
+    if fwd :
+        return hcos, horizon_index
+    
+    else :
+        return hcos[:,::-1], horizon_index[:,::-1]
+        
+def skew_transpose(dem, spacing, angle):
+    """Skew and transpose the dem for the given angle.
+    Also calculate the new spacing given the skew.
+
+    Arguments:
+        dem {array} -- numpy array of dem elevations
+        spacing {float} -- grid spacing
+        angle {float} -- skew angle
+
+    Returns:
+        t -- skew and transpose array
+        spacing -- new spacing adjusted for angle
+    """
+
+    spacing = adjust_spacing(spacing, np.abs(angle))
+    t = skew(dem, angle, fill_min=True).transpose()
+
+    return t, spacing
+
+def transpose_skew(dem, spacing, angle):
+    """Transpose, skew then transpose a dem for the
+    given angle. Also calculate the new spacing
+
+    Arguments:
+        dem {array} -- numpy array of dem elevations
+        spacing {float} -- grid spacing
+        angle {float} -- skew angle
+
+    Returns:
+        t -- skew and transpose array
+        spacing -- new spacing adjusted for angle
+    """
+
+    t = skew(dem.transpose(), angle, fill_min=True).transpose()
+    spacing = adjust_spacing(spacing, np.abs(angle))
+
+    return t, spacing
+
+def horizon(azimuth : float, dem : np.ndarray, spacing : float, max_length : float, max_threshold : bool):
+    """Calculate horizon angles for one direction. Horizon angles
+    are based on Dozier and Frew 1990 and are adapted from the
+    IPW C code.
+
+    The coordinate system for the azimuth is 0 degrees is South,
+    with positive angles through East and negative values
+    through West. Azimuth values must be on the -180 -> 0 -> 180
+    range.
+
+    Arguments:
+        azimuth {float} -- find horizon's along this direction
+        dem {np.array2d} -- numpy array of dem elevations
+        spacing {float} -- grid spacing
+
+    Returns:
+        hcos {np.array} -- cosines of angles to the horizon
+    """
+
+    if dem.ndim != 2:
+        raise ValueError('horizon input of dem is not a 2D array')
+
+    if azimuth > 180 or azimuth < -180:
+        raise ValueError('azimuth must be between -180 and 180 degrees')
+        
+
+    if azimuth == 90:
+        # East
+        hcos,_ = pyhorizon_Radius(dem = dem, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = True)
+        #hor2d_c(dem, spacing, fwd=True)
+
+    elif azimuth == -90:
+        # West
+        #hcos = hor2d_c(dem, spacing, fwd=False)
+        hcos,_ = pyhorizon_Radius(dem = dem, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = False)
+
+    elif azimuth == 0:
+        # South
+        h,_ = pyhorizon_Radius(dem = dem.transpose(), dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = True)
+        hcos = h.transpose()
+        #hcos = hor2d_c(dem.transpose(), spacing, fwd=True)
+
+    elif np.abs(azimuth) == 180:
+        # South
+        #hcos = hor2d_c(dem.transpose(), spacing, fwd=False)
+        h,_ = pyhorizon_Radius(dem = dem.transpose(), dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = False)
+        hcos = h.transpose()
+
+    elif azimuth >= -45 and azimuth <= 45:
+        # South west through south east
+        t, spacing = skew_transpose(dem, spacing, azimuth)
+        #h = hor2d_c(t, spacing, fwd=True)
+        h,_ = pyhorizon_Radius(dem = t, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = True)
+        hcos = skew(h.transpose(), azimuth, fwd=False)
+
+    elif azimuth <= -135 and azimuth > -180:
+        # North west
+        a = azimuth + 180
+        t, spacing = skew_transpose(dem, spacing, a)
+        #h = hor2d_c(t, spacing, fwd=False)
+        h,_ = pyhorizon_Radius(dem = t, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = False)
+        hcos = skew(h.transpose(), a, fwd=False)
+
+    elif azimuth >= 135 and azimuth < 180:
+        # North East
+        a = azimuth - 180
+        t, spacing = skew_transpose(dem, spacing, a)
+        #h = hor2d_c(t, spacing, fwd=False)
+        h,_ = pyhorizon_Radius(dem = t, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = False)
+        hcos = skew(h.transpose(), a, fwd=False)
+
+    elif azimuth > 45 and azimuth < 135:
+        # South east through north east
+        a = 90 - azimuth
+        t, spacing = transpose_skew(dem, spacing, a)
+        #h = hor2d_c(t, spacing, fwd=True)
+        h,_ = pyhorizon_Radius(dem = t, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = True)
+        hcos = skew(h.transpose(), a, fwd=False).transpose()
+
+    elif azimuth < -45 and azimuth > -135:
+        # South west through north west
+        a = -90 - azimuth
+        t, spacing = transpose_skew(dem, spacing, a)
+        #h = hor2d_c(t, spacing, fwd=False)
+        h,_ = pyhorizon_Radius(dem = t, dx = spacing, \
+                                       max_length = max_length, max_threshold = max_threshold, fwd = False)
+        hcos = skew(h.transpose(), a, fwd=False).transpose()
+
+    else:
+        ValueError('azimuth not valid')
+
+    # sanity check
+    assert hcos.shape == dem.shape
+
+    return hcos
+    
+def d2r(a):
+    """Angle to radians
+
+    Arguments:
+        a {float} -- angle in degrees
+
+    Returns:
+        v {float} -- angle in radians
+    """
+    v = a * np.pi / 180
+    v = round(v, 6)  # just for testing at the moment
+    return v
+
+
+def viewf(dem, spacing, nangles=72, sin_slope=None, aspect=None, max_length = 20000, max_threshold = True):
+    """
+    Calculate the sky view factor of a dem.
+
+    The sky view factor from equation 7b from Dozier and Frew 1990
+
+    .. math::
+        V_d \approx \frac{1}{2\pi} \int_{0}^{2\pi}\left [ cos(S) sin^2{H_\phi} 
+        + sin(S)cos(\phi-A) \times \left ( H_\phi - sin(H_\phi) cos(H_\phi)
+        \right )\right ] d\phi
+
+    terrain configuration factor (tvf) is defined as:
+        (1 + cos(slope))/2 - sky view factor
+
+    Based on the paper Dozier and Frew, 1990 and modified from
+    the Image Processing Workbench code base (Frew, 1990). The
+    Python version of sky view factor will be an almost exact
+    replication of the IPW command `viewf` minus rounding errors
+    from type and linear quantization.
+
+    Args:
+        dem: numpy array for the DEM
+        spacing: grid spacing of the DEM
+        nangles: number of angles to estimate the horizon, defaults
+                to 72 angles
+        sin_slope: optional, will calculate if not provided
+                    sin(slope) with range from 0 to 1
+        aspect: optional, will calculate if not provided
+                Aspect as radians from south (aspect 0 is toward
+                the south) with range from -pi to pi, with negative
+                values to the west and positive values to the east.
+
+    Returns:
+        svf: sky view factor
+        tcf: terrain configuration factor
+
+    """  # noqa
+
+    if dem.ndim != 2:
+        raise ValueError('viewf input of dem is not a 2D array')
+
+    if nangles < 16:
+        raise ValueError('viewf number of angles should be 16 or greater')
+
+    if sin_slope is not None:
+        if np.max(sin_slope) > 1:
+            raise ValueError('slope must be sin(slope) with range from 0 to 1')
+
+    # calculate the gradient if not provided
+    # The slope is returned as radians so convert to sin(S)
+    if sin_slope is None:
+        slope, aspect = gradient_d8(
+            dem, dx=spacing, dy=spacing, aspect_rad=True)
+        sin_slope = np.sin(slope)
+
+    # -180 is North
+    angles = np.linspace(-180, 180, num=nangles, endpoint=False)
+
+    # perform the integral
+    cos_slope = np.sqrt((1 - sin_slope) * (1 + sin_slope))
+    svf = np.zeros_like(sin_slope)
+    for angle in tqdm(angles):
+
+        # horizon angles
+        hcos = horizon(angle, dem, spacing, max_length = max_length, max_threshold = max_threshold)
+        azimuth = d2r(angle)
+
+        # sin^2(H)
+        sin_squared = (1 - hcos) * (1 + hcos)
+
+        # H - sin(H)cos(H)
+        h_mult = np.arccos(hcos) - np.sqrt(sin_squared) * hcos
+
+        # cosines of difference between horizon aspect and slope aspect
+        cos_aspect = np.cos(azimuth - aspect)
+
+        # integral in equation 7b
+        intgrnd = cos_slope * sin_squared + \
+            sin_slope * cos_aspect * h_mult
+
+        ind = intgrnd > 0
+        svf[ind] = svf[ind] + intgrnd[ind]
+
+    svf = svf / len(angles)
+
+    tcf = (1 + cos_slope)/2 - svf
+
+    return svf, tcf
+
+
+############### Pondération et plot ################
+
+def SVFs_based_libre_parcours_moyen(atm : str, dem : np.ndarray, slope : np.ndarray, spacing : float)->np.ndarray:
+        
+    svfs = np.zeros((dem.shape[0],dem.shape[1],len(l_moy_surface)))
+    
+    for i,l in enumerate(l_moy_surface):
+        print(i,l)
+        if 3*l < spacing :
+            svfs[:,:,i] = np.full_like(dem,1)
+            #svfs[:,:,i] = 1-(1+np.cos(np.pi-slope))/2
+        else :
+            svfs[:,:,i] = viewf(dem = dem, spacing = spacing, \
+                        nangles=72, max_length = l, max_threshold = True)[0]
+    return svfs
+
+# topo_params = xr.open_dataset("/home/barroisl/radiation_baseline/netcdfs/topo_params.nc")
+# svfs = SVFs_based_libre_parcours_moyen(atm = "SMLSATM", dem = topo_params.ZS.values, spacing = 250.0)
+
+def plot_all_svf(svfs,LW_ints,l_moy_surface):
+
+    fig, axs = plt.subplots(nrows = 4, ncols = 4, figsize = (16,16), layout = 'constrained')
+
+    vmin, vmax = 0.6,1
+
+    for i in range(16):
+        ax = axs[i//4,i%4]
+        im = ax.pcolormesh(svfs[:,:,i], cmap = 'Blues', vmin = vmin, vmax = vmax)
+        ax.set_title("$\overline{l}$" + f" = {round(l_moy_surface[i],2)} m ; " + "$\lambda \in $"\
+                     + f"[{round(1e6*LW_ints[i,1],1)},{round(1e6*LW_ints[i,0],1)}]" + " $\mu m$")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Colorbar indépendante du plot
+    vmin = vmin
+    vmax = vmax
+    cmap = cm.Blues   
+    bounds = np.arange(vmin,vmax, 0.05)
+    norm = colors.Normalize(vmin=vmin, vmax=vmax)   
+    sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])                     
+    cbar = fig.colorbar(sm, ax=axs, orientation='vertical', boundaries = bounds,
+                        fraction=0.046, pad=0.04)   
+    cbar.set_label('Sky View Factor' + "$(\overline{l})$)" + "[]")
+
+    plt.savefig("/home/barroisl/Transect_MC_auto/Output/SVFS.png")
+
+def weighted_SVFs_planck(svfs: np.ndarray, LW_ints: np.ndarray)->np.ndarray:
+    
+    mask_lbd_sup = LW_ints > 60e-6
+    mask_lbd_inf = LW_ints < 4e-6
+    LW_ints[mask_lbd_sup] = 60e-6
+    LW_ints[mask_lbd_inf] = 4e-6
+    
+    weights = np.zeros(svfs.shape[2])
+    SVF = np.zeros(svfs.shape)        
+    for i in range(svfs.shape[2]):
+        
+        lbd_1,lbd_2 = LW_ints[i,1],LW_ints[i,0]
+       
+        if lbd_1 != lbd_2 :
+            wavelengths = np.linspace(lbd_1,lbd_2,10)
+            mean_planck = np.mean(Planck_law(wavelength = wavelengths,\
+                                            temperature = 275))*(lbd_2-lbd_1)
+            weights[i] = mean_planck
+            
+        else :
+            weights[i] = 0
+        
+        SVF[:,:,i] = svfs[:,:,i]*weights[i]
+        
+    total_planck = np.nansum(weights)
+        
+    return weights/total_planck,SVF/total_planck
+    
+def plot_methodo_svfm(LW_ints,weights,force_save):
+    
+    fig, ax = plt.subplots(figsize = (12,6),layout = 'constrained')
+    ax2 = ax.twinx()
+
+    wavelengths = np.linspace(4e-6,60e-6,1000)
+    planck = Planck_law(wavelength = wavelengths,temperature = 275)
+    ax.plot(wavelengths,planck, color = 'firebrick', label = "$\mathcal{B}_\lambda(T_{ref})$")
+
+    mask_lbd_sup = LW_ints > 60e-6
+    mask_lbd_inf = LW_ints < 4e-6
+    LW_ints[mask_lbd_sup] = 60e-6
+    LW_ints[mask_lbd_inf] = 4e-6
+
+    Planck_mean = np.zeros(LW_ints.shape[0])
+
+    for i in range(LW_ints.shape[0]):
+        wavelengths = np.linspace(LW_ints[i,1],LW_ints[i,0],100)
+        planck = Planck_law(wavelength = wavelengths,temperature = 275)
+        Planck_mean[i] = np.mean(planck)
+
+    for i in range(LW_ints.shape[0]):
+
+        if i== 0 :
+            ax.hlines(y=Planck_mean[i],xmin=LW_ints[i,1],xmax= LW_ints[i,0],\
+                      label = "$\overline{\mathcal{B}_m}(T_{ref})$")
+            ax2.hlines(y=weights[i],xmin=LW_ints[i,1],xmax= LW_ints[i,0],\
+                      label = "$\overline{\mathcal{B}_m}(T_{ref})*\Delta_m\lambda/\sum_m [\overline{\mathcal{B}_m}(T_{ref})*\Delta_m\lambda]$",color='purple')
+        else :
+            ax.hlines(y=Planck_mean[i],xmin=LW_ints[i,1],xmax= LW_ints[i,0])
+            ax2.hlines(y=weights[i],xmin=LW_ints[i,1],xmax= LW_ints[i,0],color='purple')
+
+        if i < LW_ints.shape[0]-1:
+            ax.vlines(x=LW_ints[i,1],ymin=Planck_mean[i],ymax = Planck_mean[i+1])
+            ax2.vlines(x=LW_ints[i,1],ymin=weights[i],ymax = weights[i+1],color='purple')
+
+    ax.set_xlabel("$\lambda [\mu m]$")
+    ax.set_ylabel("Planck function $[W.m^{-2}.sr^{-1}.m^{-1}]$")
+    ax.spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+    
+    #x = np.sum(LW_ints, axis = 1)/2
+    #ax2.plot(x,weights, 'o', color = 'purple', label = "$\overline{\mathcal{B}_m}(T_{ref})*\Delta_m\lambda/\sum_m [\overline{\mathcal{B}_m}(T_{ref})*\Delta_m\lambda]$")
+    ax2.set_ylabel('Weights []', color = 'purple')
+    ax2.spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+    fig.legend(bbox_to_anchor=(0.4, 0., 0.5, 0.5))
+    
+    if force_save :
+
+        plt.savefig("/home/barroisl/Transect_MC_auto/Output/methodo_SVFm.png")
+        
+def modify_svfs(topo_params,svfs,l_moy_surface, spacing = 250.0):
+    
+    for i,l in enumerate(l_moy_surface):
+        if l < spacing:
+            svfs[:,:,i] = 1-(1+np.cos(np.pi-topo_params.slope.values))/2
+    return svfs
+
+def plotting_res(SVF,svfs,taux_surf,topo_params, force_save):
+
+    fig, axs= plt.subplots(nrows= 1, ncols = 2, figsize = (10,4), layout = 'constrained')
+
+    SVF_tot = np.sum(SVF,axis=2)
+
+    im = axs[0].pcolormesh(SVF_tot-svfs[:,:,-3], cmap= 'RdBu_r', vmin = -0.15, vmax = 0.15)
+    plt.colorbar(mappable = im, ax = axs[0], label = '$\sum_m SVF(\overline{l}_m)f_m-SVF_{geom}$',\
+                location='left')
+
+    axs[0].set_xticks([])
+    axs[0].set_yticks([])
+
+    axs[1].scatter(svfs[:,:,-3],SVF_tot, s = 0.1)
+    axs[1].scatter(topo_params[:,0],(1-taux_surf[:,0]), marker = '*', s = 70, c = dict_atm["SMLSATM"][1],\
+               label = dict_atm["SMLSATM"][0], alpha =0.7)
+
+    axs[1].plot([0.6,1],[0.6,1], c = 'k', linestyle = 'dashed')
+    
+
+    axs[1].set_xlabel('$SVF_{geom}$')
+    axs[1].set_ylabel('$\sum_m SVF(\overline{l}_m)f_m$')
+    axs[1].spines[['left','right', 'top', 'bottom']].set_visible(False)
+
+    if force_save :
+        
+        plt.savefig('/home/barroisl/Transect_MC_auto/Output/SVFm_result.png')
         
